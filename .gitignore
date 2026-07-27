@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+log_folder/
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+nemo_experiments/
+*.nemo
+.cache/
+data/

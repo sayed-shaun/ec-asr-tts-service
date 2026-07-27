@@ -1,0 +1,20 @@
+services:
+  asr:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - hf-cache:/opt/cache/huggingface
+    # Uncomment to enable GPU access (requires nvidia-container-toolkit on the host)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  hf-cache:
