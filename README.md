@@ -71,7 +71,7 @@ Other endpoints:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 cp .env.example .env
 ```
 
@@ -106,7 +106,7 @@ All settings are env vars prefixed `ASR_` (see `.env.example`), e.g.
 ## Testing
 
 ```bash
-pip install pytest httpx
+pip install -e ".[dev]"
 pytest -q
 ```
 
