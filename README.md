@@ -128,6 +128,11 @@ The first request triggers the Hugging Face/NeMo download of the model
 checkpoint (cached under `~/.cache/huggingface` or `$HF_HOME`) — startup will
 be slow the first time.
 
+Open `http://localhost:8000/static/index.html` for a manual test page:
+upload a file to hit `/v1/asr/transcribe/file`, or click Start on the live
+captioning section to stream your mic to `/v1/live-cc/ws` (mounted at
+`/static`, not `/` — LitServe already owns that route).
+
 ## Docker
 
 ```bash

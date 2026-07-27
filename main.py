@@ -1,4 +1,5 @@
 import litserve as ls
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from src.api.v1.asr.router import router as asr_router
@@ -19,6 +20,9 @@ def create_server() -> ls.LitServer:
     )
     server.app.include_router(asr_router)
     server.app.include_router(live_cc_router)
+    # Manual test GUI for /predict and /v1/live-cc/ws — not mounted at "/",
+    # LitServe already owns that route. See static/index.html.
+    server.app.mount("/static", StaticFiles(directory="static"), name="static")
     return server
 
 

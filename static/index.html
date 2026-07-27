@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Bangla ASR — test console</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 720px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.3rem; }
+  section {
+    border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  h2 { font-size: 1.05rem; margin-top: 0; }
+  button {
+    font: inherit;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #transcribeResult, #captions {
+    white-space: pre-wrap;
+    background: color-mix(in srgb, currentColor 6%, transparent);
+    border-radius: 6px;
+    padding: 0.75rem;
+    min-height: 2.5rem;
+    margin-top: 0.75rem;
+  }
+  .status { font-size: 0.85rem; opacity: 0.75; margin-top: 0.5rem; }
+  .status.error { color: #d33; opacity: 1; }
+</style>
+</head>
+<body>
+
+<h1>Bangla ASR — test console</h1>
+
+<section>
+  <h2>Transcribe a file</h2>
+  <p>Uploads to <code>POST /v1/asr/transcribe/file</code> — same model path as <code>/predict</code>.</p>
+  <input type="file" id="fileInput" accept="audio/*" />
+  <button id="transcribeBtn">Transcribe</button>
+  <div class="status" id="transcribeStatus"></div>
+  <div id="transcribeResult"></div>
+</section>
+
+<section>
+  <h2>Live captioning</h2>
+  <p>
+    Streams mic audio to <code>WS /v1/live-cc/ws</code> as 16-bit PCM at
+    <code>ASR_SAMPLE_RATE</code> (16 kHz); a caption arrives every
+    <code>ASR_LIVE_CC_CHUNK_SECONDS</code>.
+  </p>
+  <button id="liveCcBtn">Start</button>
+  <div class="status" id="liveCcStatus"></div>
+  <div id="captions"></div>
+</section>
+
+<script>
+const SAMPLE_RATE = 16000;
+
+// ---- Transcribe a file ----
+
+const fileInput = document.getElementById("fileInput");
+const transcribeBtn = document.getElementById("transcribeBtn");
+const transcribeStatus = document.getElementById("transcribeStatus");
+const transcribeResult = document.getElementById("transcribeResult");
+
+transcribeBtn.addEventListener("click", async () => {
+  const file = fileInput.files[0];
+  if (!file) {
+    transcribeStatus.textContent = "Choose a file first.";
+    transcribeStatus.className = "status error";
+    return;
+  }
+
+  transcribeBtn.disabled = true;
+  transcribeStatus.className = "status";
+  transcribeStatus.textContent = "Transcribing...";
+  transcribeResult.textContent = "";
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    const resp = await fetch("/v1/asr/transcribe/file", { method: "POST", body: formData });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    const text = (data.output || []).map((o) => o.source).join(" ");
+    transcribeResult.textContent = text || "(empty transcript)";
+    transcribeStatus.textContent = `Done in ${data.time_taken?.toFixed(2)}s`;
+  } catch (err) {
+    transcribeStatus.textContent = `Error: ${err.message}`;
+    transcribeStatus.className = "status error";
+  } finally {
+    transcribeBtn.disabled = false;
+  }
+});
+
+// ---- Live captioning ----
+
+const liveCcBtn = document.getElementById("liveCcBtn");
+const liveCcStatus = document.getElementById("liveCcStatus");
+const captions = document.getElementById("captions");
+
+let audioContext = null;
+let mediaStream = null;
+let processorNode = null;
+let socket = null;
+let isLive = false;
+
+function floatTo16BitPCM(float32Array) {
+  const buffer = new ArrayBuffer(float32Array.length * 2);
+  const view = new DataView(buffer);
+  for (let i = 0, offset = 0; i < float32Array.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buffer;
+}
+
+async function startLiveCc() {
+  captions.textContent = "";
+  liveCcStatus.className = "status";
+  liveCcStatus.textContent = "Requesting microphone...";
+
+  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+  socket = new WebSocket(`${wsProtocol}//${location.host}/v1/live-cc/ws`);
+  socket.binaryType = "arraybuffer";
+
+  socket.onopen = () => {
+    liveCcStatus.textContent = "Listening...";
+
+    // ScriptProcessorNode is deprecated but needs no extra worklet file to
+    // load — simplest option for a manual test page like this one.
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+    processorNode.onaudioprocess = (event) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(floatTo16BitPCM(event.inputBuffer.getChannelData(0)));
+      }
+    };
+
+    source.connect(processorNode);
+    processorNode.connect(audioContext.destination);
+  };
+
+  socket.onmessage = (event) => {
+    const { text } = JSON.parse(event.data);
+    captions.textContent += (captions.textContent ? " " : "") + text;
+  };
+
+  socket.onerror = () => {
+    liveCcStatus.textContent = "WebSocket error.";
+    liveCcStatus.className = "status error";
+  };
+
+  socket.onclose = () => {
+    if (isLive) stopLiveCc();
+  };
+}
+
+function stopLiveCc() {
+  isLive = false;
+  liveCcBtn.textContent = "Start";
+  liveCcStatus.textContent = "Stopped.";
+
+  processorNode?.disconnect();
+  audioContext?.close();
+  mediaStream?.getTracks().forEach((t) => t.stop());
+  if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+
+  processorNode = null;
+  audioContext = null;
+  mediaStream = null;
+  socket = null;
+}
+
+liveCcBtn.addEventListener("click", async () => {
+  if (isLive) {
+    stopLiveCc();
+    return;
+  }
+  isLive = true;
+  liveCcBtn.textContent = "Stop";
+  try {
+    await startLiveCc();
+  } catch (err) {
+    liveCcStatus.textContent = `Error: ${err.message}`;
+    liveCcStatus.className = "status error";
+    stopLiveCc();
+  }
+});
+</script>
+
+</body>
+</html>
