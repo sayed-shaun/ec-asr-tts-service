@@ -8,7 +8,14 @@ class Settings(BaseSettings):
 
     MODEL_NAME: str = "hishab/titu_stt_bn_fastconformer"
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
-    DEVICES: Union[int, Literal["auto"]] = "auto"
+
+    # LitServe's "auto" device count shells out to `nvidia-smi -L` (not
+    # torch.cuda) — on a machine where nvidia-smi is broken (e.g. an NVML
+    # driver/library version mismatch) but torch.cuda.is_available() is
+    # genuinely True, "auto" silently resolves to 0 devices and server.run()
+    # crashes with "num_api_servers must be greater than 0". Pin the real
+    # GPU count explicitly instead of depending on nvidia-smi being healthy.
+    DEVICES: Union[int, Literal["auto"]] = 1
 
     # Each worker is a separate process holding its own full copy of the model
     # in GPU memory — this is the main throughput lever for concurrent requests,
