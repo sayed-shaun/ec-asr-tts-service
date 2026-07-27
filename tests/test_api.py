@@ -1,6 +1,10 @@
 import base64
 import io
+import shutil
+import subprocess
+import tempfile
 import wave
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -58,6 +62,30 @@ def test_decode_base64_audio_resamples():
 def test_decode_base64_audio_rejects_garbage():
     with pytest.raises(ValueError):
         decode_base64_audio(base64.b64encode(b"not audio").decode(), target_sr=16000)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
+def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
+    # Regression test: librosa can't decode compressed containers (webm/opus,
+    # what MediaRecorder produces in browsers) from an in-memory BytesIO —
+    # soundfile doesn't support the format at all, and its audioread/ffmpeg
+    # fallback needs a real file path, not a stream.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        webm_path = Path(tmp_dir) / "test.webm"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5", "-c:a", "libopus", str(webm_path)],
+            check=True,
+            capture_output=True,
+        )
+        b64 = base64.b64encode(webm_path.read_bytes()).decode()
+
+    before = set(Path(tempfile.gettempdir()).iterdir())
+    waveform = decode_base64_audio(b64, target_sr=16000)
+    after = set(Path(tempfile.gettempdir()).iterdir())
+
+    assert waveform.dtype == np.float32
+    assert waveform.size > 0
+    assert after == before  # no leftover temp file
 
 
 def test_asr_request_rejects_empty_audio_list():

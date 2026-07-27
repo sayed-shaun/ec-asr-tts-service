@@ -46,4 +46,9 @@ filterwarnings = [
     # to fix — nothing in this repo touches aifc/sunau directly.
     "ignore:aifc was removed in Python 3.13:DeprecationWarning",
     "ignore:sunau was removed in Python 3.13:DeprecationWarning",
+    # Expected for any compressed format (webm/opus, mp4, mp3, ...) — soundfile/
+    # libsndfile only reads a handful of container formats, so decode_base64_audio's
+    # audioread/ffmpeg fallback is the intended path for anything else, not a bug.
+    "ignore:PySoundFile failed. Trying audioread instead.:UserWarning",
+    "ignore:librosa.core.audio.__audioread_load:FutureWarning",
 ]
