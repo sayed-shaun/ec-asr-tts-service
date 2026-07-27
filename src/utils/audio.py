@@ -1,6 +1,8 @@
 import base64
+import io
 import os
 import tempfile
+import wave
 
 import librosa
 import numpy as np
@@ -39,3 +41,24 @@ def decode_base64_audio(audio_content: str, target_sr: int) -> np.ndarray:
         raise ValueError("Decoded waveform is empty")
 
     return waveform.astype(np.float32)
+
+
+def warm_audio_decoder(target_sr: int) -> None:
+    """Force librosa/soundfile/soxr's lazy initialization at startup.
+
+    The first decode_base64_audio() call in a process costs ~920ms (measured)
+    purely in lazy imports and codec/resampler setup, vs ~0.6ms afterwards.
+    Without this the first real request eats that cost. Best-effort: a failed
+    warmup must not stop a worker from coming up.
+    """
+    samples = np.zeros(target_sr // 10, dtype=np.int16)  # 100ms of silence
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        # Deliberately not target_sr: exercises the resampler too, which has
+        # its own one-off init cost on the first non-passthrough conversion.
+        wav_file.setframerate(target_sr // 2)
+        wav_file.writeframes(samples.tobytes())
+
+    decode_base64_audio(base64.b64encode(buf.getvalue()).decode("utf-8"), target_sr=target_sr)

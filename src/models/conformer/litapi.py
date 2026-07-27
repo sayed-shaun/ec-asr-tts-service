@@ -2,11 +2,12 @@ import time
 
 import litserve as ls
 from fastapi import HTTPException
+from loguru import logger
 
 from src.api.v1.asr.schema import AsrRequest, AsrResponse, Output
 from src.core.config import settings
 from src.models.conformer.engine import ASREngine
-from src.utils.audio import decode_base64_audio
+from src.utils.audio import decode_base64_audio, warm_audio_decoder
 
 
 class ASRLitAPI(ls.LitAPI):
@@ -18,7 +19,15 @@ class ASRLitAPI(ls.LitAPI):
             device=device,
             max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
         )
-        self.engine.load()
+        self.engine.load(sample_rate=settings.SAMPLE_RATE)
+
+        # The engine warms the model; this warms the audio-decode half of the
+        # request path, which is the larger of the two one-off costs.
+        try:
+            warm_audio_decoder(settings.SAMPLE_RATE)
+            logger.info("Audio decoder warmed up")
+        except Exception as exc:  # noqa: BLE001 — warmup is best-effort
+            logger.warning(f"Audio decoder warmup failed (continuing anyway): {exc}")
 
     def decode_request(self, request: AsrRequest) -> dict:
         sample_rate = request.config.samplingRate or settings.SAMPLE_RATE

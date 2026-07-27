@@ -14,13 +14,27 @@ class ASREngine:
         self.model = None
         self.max_segment_seconds = max_segment_seconds
 
-    def load(self) -> None:
+    def load(self, warmup_seconds: float = 1.0, sample_rate: int = 16000) -> None:
         import nemo.collections.asr as nemo_asr
 
         logger.info(f"Loading NeMo ASR model '{self.model_name}' on device '{self.device}'")
         self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=self.model_name)
         self.model = self.model.to(self.device)
         self.model.eval()
+
+        # First inference pays a large one-off cost (cuDNN algo selection, CUDA
+        # kernel/JIT warmup, lazy module init) — measured ~740ms vs ~26ms
+        # steady state on an RTX 2050. Burn it here at startup so the first
+        # real request doesn't. Silent no-op on failure: a warmup that can't
+        # run must not stop the worker from coming up.
+        if warmup_seconds > 0:
+            try:
+                silence = np.zeros(int(sample_rate * warmup_seconds), dtype=np.float32)
+                self.transcribe([silence], batch_size=1, sample_rate=sample_rate)
+                logger.info("ASR model warmed up")
+            except Exception as exc:  # noqa: BLE001 — warmup is best-effort
+                logger.warning(f"ASR model warmup failed (continuing anyway): {exc}")
+
         logger.info("ASR model loaded")
 
     def transcribe(self, audios: list[np.ndarray], batch_size: int = 4, sample_rate: int = 16000) -> list[str]:
