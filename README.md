@@ -163,6 +163,45 @@ remove that block and set `ASR_ACCELERATOR=cpu` for a CPU-only host.
 All settings are env vars prefixed `ASR_` (see `.env.example`), e.g.
 `ASR_ACCELERATOR`, `ASR_TRANSCRIBE_BATCH_SIZE`, `ASR_PORT`, `ASR_MODEL_NAME`.
 
+## Performance
+
+Numbers below are measured on an RTX 2050 with a 3s clip, `WORKERS_PER_DEVICE=2`.
+Re-measure on your own hardware before treating any of them as a target.
+
+| | |
+|---|---|
+| Steady-state latency | ~30 ms (RTF ~0.007, ≈140x realtime) |
+| First request (cold) | ~69 ms — was 744 ms before warmup |
+| Throughput | 28 req/s at concurrency 1, ~46 req/s at 2+ |
+
+**Startup warmup.** The first request into a fresh worker used to pay two
+one-off initialization costs: ~920 ms for librosa/soundfile/soxr lazy imports
+on the first `decode_base64_audio()`, and ~279 ms of cuDNN/CUDA warmup on the
+first `model.transcribe()`. Both are now burned during `setup()`
+(`ASREngine.load()` warms the model, `warm_audio_decoder()` warms the decode
+path), best-effort so a failed warmup can't stop a worker coming up. Don't
+remove them — the cost doesn't disappear, it just moves onto your first user.
+
+**Throughput plateaus at ~46 req/s** because both workers saturate;
+`ASR_WORKERS_PER_DEVICE` is the lever, bounded by GPU memory since each worker
+holds a full model copy.
+
+**Measured, deliberately not done:**
+
+- *FP16* — no win here (18.6 ms vs 18.1 ms at 1s audio). The model is small
+  enough to be latency-bound rather than compute-bound, so tensor cores don't
+  buy anything. Might change on a bigger GPU with longer audio.
+- *Avoiding the temp file in `decode_base64_audio`* — costs 0.11 ms, versus
+  ~20 ms of inference. Not worth reintroducing the BytesIO path that broke
+  WebM/Opus decoding.
+- *Avoiding the internal ASGI re-dispatch* (`transcribe/file`, live-cc) —
+  costs 5.8 ms, cheap for keeping the model in exactly one place.
+
+**Audio format matters on hot paths.** WebM/Opus decodes in ~31 ms because it
+shells out to ffmpeg; WAV decodes in ~0.3 ms via soundfile. Fine for the
+record-voice button (once per recording), but send raw PCM or WAV through
+live-cc's high-frequency path, not WebM.
+
 ## Testing
 
 ```bash
