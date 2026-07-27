@@ -39,9 +39,18 @@ class Settings(BaseSettings):
     API_PATH: str = "/api/v1/asr/transcribe"
 
     # live-cc buffers raw PCM off the WebSocket and transcribes one chunk at a
-    # time — this is the caption latency (and, since chunks are hard cuts with
-    # no overlap, the rough granularity words can get split at).
+    # time — this is the FINAL caption latency (and, since chunks are hard
+    # cuts with no overlap, the rough granularity words can get split at).
     LIVE_CC_CHUNK_SECONDS: float = 3.0
+
+    # Every this many seconds of in-progress audio, re-transcribe the whole
+    # in-progress chunk so far and push it as an interim (is_final: false)
+    # caption — gives the feel of live-updating text using the same offline
+    # model as a black box, no incremental decoding. Real cost: each interim
+    # re-transcribes from the start of the current chunk, so total GPU work
+    # per chunk scales up (roughly chunk_seconds / this, redundant compute).
+    # Set to 0 to disable interim updates and only emit final captions.
+    LIVE_CC_INTERIM_INTERVAL_SECONDS: float = 1.0
 
     # The sample rate of the raw PCM the client actually streams over the
     # WebSocket — used both to label the WAV header correctly (so librosa

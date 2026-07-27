@@ -88,23 +88,38 @@ Other endpoints:
 ## live-cc: live closed captioning
 
 `WS /v1/live-cc/ws` — same model as batch requests, streamed. Client sends
-raw 16-bit PCM mono audio at `ASR_SAMPLE_RATE` over the socket in any chunk
-size; the server buffers it, and every `ASR_LIVE_CC_CHUNK_SECONDS` worth of
-audio it sends back a caption:
+raw 16-bit PCM mono audio at `ASR_LIVE_CC_INPUT_SAMPLE_RATE` over the socket
+in any chunk size. Two kinds of caption come back:
 
 ```json
-{"text": "transcribed bengali text", "is_final": true}
+{"text": "in-progress guess so far", "is_final": false}
+{"text": "committed bengali text", "is_final": true}
 ```
 
+Every `ASR_LIVE_CC_INTERIM_INTERVAL_SECONDS` of in-progress audio, the whole
+in-progress chunk is re-transcribed and pushed as an interim caption
+(`is_final: false`) — replace the previous interim with each new one, don't
+append. Every `ASR_LIVE_CC_CHUNK_SECONDS` the chunk is finalized
+(`is_final: true`), appended permanently, and the buffer resets. This is what
+makes captions feel like they're live-updating rather than arriving in one
+lump every `ASR_LIVE_CC_CHUNK_SECONDS`.
+
 Implementation: like `transcribe_file`, this route never touches the model
-directly (it runs in the main process, not a LitServe worker) — each buffered
-chunk is wrapped as a WAV and re-dispatched internally to `POST /predict`,
-reusing the exact same model path. Chunking is a hard cut with no overlap, so
-`ASR_LIVE_CC_CHUNK_SECONDS` is a latency/word-splitting tradeoff: shorter
-means captions arrive faster but words at chunk boundaries can get cut;
-longer is the reverse. This is buffered pseudo-streaming, not true
-incremental decoding — there's no cache-aware streaming state carried between
-chunks, so each chunk is transcribed independently.
+directly (it runs in the main process, not a LitServe worker) — each
+transcription (interim or final) is wrapped as a WAV and re-dispatched
+internally to `POST /predict`, reusing the exact same model path. This means
+interim updates cost real, redundant GPU work: each one re-transcribes from
+the start of the current chunk, so total compute per chunk scales up
+(roughly `chunk_seconds / interim_seconds`) — tune
+`ASR_LIVE_CC_INTERIM_INTERVAL_SECONDS` down if you're running multiple
+concurrent live-cc connections on a memory/compute-constrained GPU, or set it
+to `0` to disable interim updates entirely. `ASR_LIVE_CC_CHUNK_SECONDS` is
+still a latency/word-splitting tradeoff for the *final* text: chunks are hard
+cuts with no overlap, so shorter means final captions commit faster but words
+at chunk boundaries can get cut, longer is the reverse. This is buffered
+pseudo-streaming, not true incremental decoding — there's no cache-aware
+streaming state carried between chunks, so each transcription is independent
+and starts from scratch.
 
 ## Setup
 

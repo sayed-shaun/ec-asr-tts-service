@@ -157,12 +157,39 @@ def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
 
 
 def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
+    # Half a chunk (1.5s) already crosses one interim step (1.0s), so the first
+    # half triggers an interim caption before the second half finalizes it.
     chunk_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
     half_pcm = np.zeros(chunk_samples // 2, dtype=np.int16).tobytes()
 
     with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
         ws.send_bytes(half_pcm)
+        interim = ws.receive_json()
         ws.send_bytes(half_pcm)
-        message = ws.receive_json()
+        final = ws.receive_json()
 
-    assert message == {"text": "হ্যালো", "is_final": True}
+    assert interim == {"text": "হ্যালো", "is_final": False}
+    assert final == {"text": "হ্যালো", "is_final": True}
+
+
+def test_live_cc_ws_emits_interim_captions_before_final(live_cc_client):
+    interim_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_INTERIM_INTERVAL_SECONDS)
+    step_pcm = np.zeros(interim_samples, dtype=np.int16).tobytes()
+
+    chunk_seconds = settings.LIVE_CC_CHUNK_SECONDS
+    interim_seconds = settings.LIVE_CC_INTERIM_INTERVAL_SECONDS
+    num_interim_steps = int(chunk_seconds / interim_seconds) - 1
+
+    with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
+        messages = []
+        for _ in range(num_interim_steps):
+            ws.send_bytes(step_pcm)
+            messages.append(ws.receive_json())
+
+        # Send the remainder to cross the final chunk boundary.
+        remaining_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * chunk_seconds) - interim_samples * num_interim_steps
+        ws.send_bytes(np.zeros(remaining_samples, dtype=np.int16).tobytes())
+        messages.append(ws.receive_json())
+
+    assert all(m["is_final"] is False for m in messages[:-1])
+    assert messages[-1]["is_final"] is True

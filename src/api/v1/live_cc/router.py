@@ -22,11 +22,25 @@ def _pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
+async def _transcribe(client: httpx.AsyncClient, pcm_bytes: bytes, input_sr: int) -> str:
+    wav_bytes = _pcm_to_wav_bytes(pcm_bytes, input_sr)
+    payload = {
+        "config": {"language": {"sourceLanguage": "bn"}},
+        "audio": [{"audioContent": base64.b64encode(wav_bytes).decode("utf-8")}],
+    }
+    resp = await client.post(settings.API_PATH, json=payload, timeout=120)
+    data = resp.json()
+    return " ".join(item.get("source", "") for item in data.get("output", []))
+
+
 @router.websocket("/ws")
 async def live_cc_ws(websocket: WebSocket) -> None:
     """Live closed-captioning: client streams raw 16-bit PCM mono audio at
-    settings.LIVE_CC_INPUT_SAMPLE_RATE; every LIVE_CC_CHUNK_SECONDS worth of
-    audio is transcribed and the resulting caption text is pushed back.
+    settings.LIVE_CC_INPUT_SAMPLE_RATE. Every LIVE_CC_INTERIM_INTERVAL_SECONDS
+    of in-progress audio, the whole in-progress chunk is re-transcribed and
+    pushed as an interim caption (is_final: false) — gives the feel of
+    live-updating text without incremental decoding. Every LIVE_CC_CHUNK_SECONDS
+    the chunk is finalized (is_final: true) and the buffer resets.
 
     Each chunk is labeled with the *input* rate, not the model's rate —
     decode_base64_audio (via the /predict re-dispatch below) resamples from
@@ -43,7 +57,10 @@ async def live_cc_ws(websocket: WebSocket) -> None:
 
     input_sr = settings.LIVE_CC_INPUT_SAMPLE_RATE
     chunk_byte_target = int(input_sr * settings.LIVE_CC_CHUNK_SECONDS) * _PCM_SAMPLE_WIDTH_BYTES
+    interim_byte_step = int(input_sr * settings.LIVE_CC_INTERIM_INTERVAL_SECONDS) * _PCM_SAMPLE_WIDTH_BYTES
+
     buffer = bytearray()
+    next_interim_at = interim_byte_step
 
     transport = httpx.ASGITransport(app=websocket.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://internal") as client:
@@ -54,15 +71,13 @@ async def live_cc_ws(websocket: WebSocket) -> None:
                 while len(buffer) >= chunk_byte_target:
                     segment = bytes(buffer[:chunk_byte_target])
                     del buffer[:chunk_byte_target]
-
-                    wav_bytes = _pcm_to_wav_bytes(segment, input_sr)
-                    payload = {
-                        "config": {"language": {"sourceLanguage": "bn"}},
-                        "audio": [{"audioContent": base64.b64encode(wav_bytes).decode("utf-8")}],
-                    }
-                    resp = await client.post(settings.API_PATH, json=payload, timeout=120)
-                    data = resp.json()
-                    text = " ".join(item.get("source", "") for item in data.get("output", []))
+                    text = await _transcribe(client, segment, input_sr)
                     await websocket.send_json({"text": text, "is_final": True})
+                    next_interim_at = interim_byte_step
+
+                if interim_byte_step > 0 and len(buffer) >= next_interim_at:
+                    text = await _transcribe(client, bytes(buffer), input_sr)
+                    await websocket.send_json({"text": text, "is_final": False})
+                    next_interim_at += interim_byte_step
         except WebSocketDisconnect:
             pass

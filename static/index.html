@@ -36,6 +36,7 @@
     min-height: 2.5rem;
     margin-top: 0.75rem;
   }
+  #captions .interim { opacity: 0.55; font-style: italic; }
   .status { font-size: 0.85rem; opacity: 0.75; margin-top: 0.5rem; }
   .status.error { color: #d33; opacity: 1; }
 </style>
@@ -58,7 +59,9 @@
   <h2>Live captioning</h2>
   <p>
     Streams mic audio to <code>WS /v1/live-cc/ws</code> as 16-bit PCM at
-    <code>ASR_LIVE_CC_INPUT_SAMPLE_RATE</code>; a caption arrives every
+    <code>ASR_LIVE_CC_INPUT_SAMPLE_RATE</code>. An <em>interim</em> caption
+    (shown dimmed) updates every <code>ASR_LIVE_CC_INTERIM_INTERVAL_SECONDS</code>;
+    it's replaced by a committed final caption every
     <code>ASR_LIVE_CC_CHUNK_SECONDS</code>.
   </p>
   <button id="liveCcBtn">Start</button>
@@ -173,7 +176,22 @@ function floatTo16BitPCM(float32Array) {
   return buffer;
 }
 
+let finalizedCaptions = "";
+
+function renderCaptions(interimText) {
+  captions.textContent = "";
+  if (finalizedCaptions) captions.append(finalizedCaptions);
+  if (interimText) {
+    if (finalizedCaptions) captions.append(" ");
+    const span = document.createElement("span");
+    span.className = "interim";
+    span.textContent = interimText;
+    captions.append(span);
+  }
+}
+
 async function startLiveCc() {
+  finalizedCaptions = "";
   captions.textContent = "";
   liveCcStatus.className = "status";
   liveCcStatus.textContent = "Requesting microphone...";
@@ -204,8 +222,13 @@ async function startLiveCc() {
   };
 
   socket.onmessage = (event) => {
-    const { text } = JSON.parse(event.data);
-    captions.textContent += (captions.textContent ? " " : "") + text;
+    const { text, is_final } = JSON.parse(event.data);
+    if (is_final) {
+      finalizedCaptions = finalizedCaptions ? `${finalizedCaptions} ${text}` : text;
+      renderCaptions("");
+    } else {
+      renderCaptions(text);
+    }
   };
 
   socket.onerror = () => {
