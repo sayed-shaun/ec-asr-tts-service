@@ -146,7 +146,7 @@ def live_cc_client():
 
 
 def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
-    chunk_samples = int(settings.SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
+    chunk_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
     pcm = np.zeros(chunk_samples, dtype=np.int16).tobytes()
 
     with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
@@ -157,7 +157,7 @@ def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
 
 
 def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
-    chunk_samples = int(settings.SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
+    chunk_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
     half_pcm = np.zeros(chunk_samples // 2, dtype=np.int16).tobytes()
 
     with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:

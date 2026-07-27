@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # no overlap, the rough granularity words can get split at).
     LIVE_CC_CHUNK_SECONDS: float = 3.0
 
+    # The sample rate of the raw PCM the client actually streams over the
+    # WebSocket — used both to label the WAV header correctly (so librosa
+    # resamples from the true source rate to SAMPLE_RATE, not a mislabeled
+    # one) and to compute how many bytes make up one LIVE_CC_CHUNK_SECONDS
+    # buffer. Set this to match your actual input, not SAMPLE_RATE.
+    LIVE_CC_INPUT_SAMPLE_RATE: int = 8000
+
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
 

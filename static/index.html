@@ -45,10 +45,11 @@
 <h1>Bangla ASR — test console</h1>
 
 <section>
-  <h2>Transcribe a file</h2>
+  <h2>Transcribe</h2>
   <p>Uploads to <code>POST /v1/asr/transcribe/file</code> — same model path as <code>/predict</code>.</p>
   <input type="file" id="fileInput" accept="audio/*" />
-  <button id="transcribeBtn">Transcribe</button>
+  <button id="transcribeBtn">Transcribe file</button>
+  <button id="recordBtn">🎤 Record voice</button>
   <div class="status" id="transcribeStatus"></div>
   <div id="transcribeResult"></div>
 </section>
@@ -57,7 +58,7 @@
   <h2>Live captioning</h2>
   <p>
     Streams mic audio to <code>WS /v1/live-cc/ws</code> as 16-bit PCM at
-    <code>ASR_SAMPLE_RATE</code> (16 kHz); a caption arrives every
+    <code>ASR_LIVE_CC_INPUT_SAMPLE_RATE</code>; a caption arrives every
     <code>ASR_LIVE_CC_CHUNK_SECONDS</code>.
   </p>
   <button id="liveCcBtn">Start</button>
@@ -66,31 +67,30 @@
 </section>
 
 <script>
-const SAMPLE_RATE = 16000;
+// Must match ASR_LIVE_CC_INPUT_SAMPLE_RATE on the server — this is the rate
+// this page's mic capture is resampled to before sending, not the model's
+// own SAMPLE_RATE (16kHz). Mismatching the two mislabels the WAV header
+// server-side and corrupts playback speed rather than failing loudly.
+const LIVE_CC_INPUT_SAMPLE_RATE = 8000;
 
-// ---- Transcribe a file ----
+// ---- Transcribe (file upload or recorded voice) ----
 
 const fileInput = document.getElementById("fileInput");
 const transcribeBtn = document.getElementById("transcribeBtn");
+const recordBtn = document.getElementById("recordBtn");
 const transcribeStatus = document.getElementById("transcribeStatus");
 const transcribeResult = document.getElementById("transcribeResult");
 
-transcribeBtn.addEventListener("click", async () => {
-  const file = fileInput.files[0];
-  if (!file) {
-    transcribeStatus.textContent = "Choose a file first.";
-    transcribeStatus.className = "status error";
-    return;
-  }
-
+async function transcribeBlob(blob, filename) {
   transcribeBtn.disabled = true;
+  recordBtn.disabled = true;
   transcribeStatus.className = "status";
   transcribeStatus.textContent = "Transcribing...";
   transcribeResult.textContent = "";
 
   try {
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append("file", blob, filename);
     const resp = await fetch("/v1/asr/transcribe/file", { method: "POST", body: formData });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
@@ -103,6 +103,51 @@ transcribeBtn.addEventListener("click", async () => {
     transcribeStatus.className = "status error";
   } finally {
     transcribeBtn.disabled = false;
+    recordBtn.disabled = false;
+  }
+}
+
+transcribeBtn.addEventListener("click", () => {
+  const file = fileInput.files[0];
+  if (!file) {
+    transcribeStatus.textContent = "Choose a file first.";
+    transcribeStatus.className = "status error";
+    return;
+  }
+  transcribeBlob(file, file.name);
+});
+
+let mediaRecorder = null;
+let isRecording = false;
+
+recordBtn.addEventListener("click", async () => {
+  if (isRecording) {
+    mediaRecorder.stop();
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+
+    mediaRecorder.ondataavailable = (event) => chunks.push(event.data);
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      isRecording = false;
+      recordBtn.textContent = "🎤 Record voice";
+      const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
+      transcribeBlob(blob, "recording.webm");
+    };
+
+    mediaRecorder.start();
+    isRecording = true;
+    recordBtn.textContent = "⏹ Stop recording";
+    transcribeStatus.className = "status";
+    transcribeStatus.textContent = "Recording...";
+  } catch (err) {
+    transcribeStatus.textContent = `Error: ${err.message}`;
+    transcribeStatus.className = "status error";
   }
 });
 
@@ -144,7 +189,7 @@ async function startLiveCc() {
 
     // ScriptProcessorNode is deprecated but needs no extra worklet file to
     // load — simplest option for a manual test page like this one.
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: LIVE_CC_INPUT_SAMPLE_RATE });
     const source = audioContext.createMediaStreamSource(mediaStream);
     processorNode = audioContext.createScriptProcessor(4096, 1, 1);
 

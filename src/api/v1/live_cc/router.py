@@ -25,8 +25,14 @@ def _pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int) -> bytes:
 @router.websocket("/ws")
 async def live_cc_ws(websocket: WebSocket) -> None:
     """Live closed-captioning: client streams raw 16-bit PCM mono audio at
-    settings.SAMPLE_RATE; every LIVE_CC_CHUNK_SECONDS worth of audio is
-    transcribed and the resulting caption text is pushed back.
+    settings.LIVE_CC_INPUT_SAMPLE_RATE; every LIVE_CC_CHUNK_SECONDS worth of
+    audio is transcribed and the resulting caption text is pushed back.
+
+    Each chunk is labeled with the *input* rate, not the model's rate —
+    decode_base64_audio (via the /predict re-dispatch below) resamples from
+    whatever the WAV header says to settings.SAMPLE_RATE, same as any other
+    upload. Mislabeling this would silently corrupt the audio (wrong
+    playback speed) rather than fail loudly.
 
     Reuses the same model as batch requests by re-dispatching each buffered
     chunk to settings.API_PATH over an in-process ASGI call (same pattern as
@@ -35,7 +41,8 @@ async def live_cc_ws(websocket: WebSocket) -> None:
     """
     await websocket.accept()
 
-    chunk_byte_target = int(settings.SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS) * _PCM_SAMPLE_WIDTH_BYTES
+    input_sr = settings.LIVE_CC_INPUT_SAMPLE_RATE
+    chunk_byte_target = int(input_sr * settings.LIVE_CC_CHUNK_SECONDS) * _PCM_SAMPLE_WIDTH_BYTES
     buffer = bytearray()
 
     transport = httpx.ASGITransport(app=websocket.app)
@@ -48,7 +55,7 @@ async def live_cc_ws(websocket: WebSocket) -> None:
                     segment = bytes(buffer[:chunk_byte_target])
                     del buffer[:chunk_byte_target]
 
-                    wav_bytes = _pcm_to_wav_bytes(segment, settings.SAMPLE_RATE)
+                    wav_bytes = _pcm_to_wav_bytes(segment, input_sr)
                     payload = {
                         "config": {"language": {"sourceLanguage": "bn"}},
                         "audio": [{"audioContent": base64.b64encode(wav_bytes).decode("utf-8")}],
