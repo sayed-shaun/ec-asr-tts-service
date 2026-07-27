@@ -2,6 +2,7 @@ import litserve as ls
 from loguru import logger
 
 from src.api.v1.asr.router import router as asr_router
+from src.api.v1.live_cc.router import router as live_cc_router
 from src.core.config import settings
 from src.models.conformer.litapi import ASRLitAPI
 from src.core.logging import configure_logging
@@ -17,6 +18,7 @@ def create_server() -> ls.LitServer:
         healthcheck_path="/health",
     )
     server.app.include_router(asr_router)
+    server.app.include_router(live_cc_router)
     return server
 
 

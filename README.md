@@ -22,6 +22,8 @@ src/
   api/v1/asr/
     schema.py                   # request/response contract (pydantic) — only thing this dir holds, besides router
     router.py                    # extra FastAPI routes mounted on the LitServer app
+  api/v1/live_cc/
+    router.py                    # WebSocket live-captioning endpoint (see below)
 tests/
   test_api.py                  # unit tests (engine mocked, no GPU/model needed)
 examples/
@@ -83,6 +85,27 @@ Other endpoints:
   re-dispatches to `POST /predict` internally — same model path, no duplicated logic
 - `GET /docs` — interactive Swagger UI
 
+## live-cc: live closed captioning
+
+`WS /v1/live-cc/ws` — same model as batch requests, streamed. Client sends
+raw 16-bit PCM mono audio at `ASR_SAMPLE_RATE` over the socket in any chunk
+size; the server buffers it, and every `ASR_LIVE_CC_CHUNK_SECONDS` worth of
+audio it sends back a caption:
+
+```json
+{"text": "transcribed bengali text", "is_final": true}
+```
+
+Implementation: like `transcribe_file`, this route never touches the model
+directly (it runs in the main process, not a LitServe worker) — each buffered
+chunk is wrapped as a WAV and re-dispatched internally to `POST /predict`,
+reusing the exact same model path. Chunking is a hard cut with no overlap, so
+`ASR_LIVE_CC_CHUNK_SECONDS` is a latency/word-splitting tradeoff: shorter
+means captions arrive faster but words at chunk boundaries can get cut;
+longer is the reverse. This is buffered pseudo-streaming, not true
+incremental decoding — there's no cache-aware streaming state carried between
+chunks, so each chunk is transcribed independently.
+
 ## Setup
 
 ```bash
@@ -111,8 +134,9 @@ be slow the first time.
 docker compose up --build
 ```
 
-Uncomment the `deploy.resources` block in `docker-compose.yml` for GPU
-acceleration (requires `nvidia-container-toolkit` on the host).
+GPU acceleration is on by default (`deploy.resources` in `docker-compose.yml`,
+`ASR_ACCELERATOR=cuda`) and requires `nvidia-container-toolkit` on the host;
+remove that block and set `ASR_ACCELERATOR=cpu` for a CPU-only host.
 
 ## Configuration
 

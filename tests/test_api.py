@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from src.api.v1.asr.router import router as asr_router
 from src.api.v1.asr.schema import AsrRequest
+from src.api.v1.live_cc.router import router as live_cc_router
 from src.core.config import settings
 from src.models.conformer.engine import ASREngine
 from src.models.conformer.litapi import ASRLitAPI
@@ -130,3 +131,38 @@ def test_asr_engine_respects_custom_sample_rate_for_segment_length():
     segments = engine.model.transcribe.call_args.kwargs["audio"]
     assert len(segments) == 2
     assert all(len(seg) <= 8000 for seg in segments)
+
+
+@pytest.fixture
+def live_cc_client():
+    app = FastAPI()
+    app.include_router(live_cc_router)
+
+    @app.post(settings.API_PATH)
+    async def fake_predict(payload: dict) -> dict:
+        return {"taskType": "asr", "output": [{"source": "হ্যালো"}], "time_taken": 0.1}
+
+    return TestClient(app)
+
+
+def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
+    chunk_samples = int(settings.SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
+    pcm = np.zeros(chunk_samples, dtype=np.int16).tobytes()
+
+    with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
+        ws.send_bytes(pcm)
+        message = ws.receive_json()
+
+    assert message == {"text": "হ্যালো", "is_final": True}
+
+
+def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
+    chunk_samples = int(settings.SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
+    half_pcm = np.zeros(chunk_samples // 2, dtype=np.int16).tobytes()
+
+    with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
+        ws.send_bytes(half_pcm)
+        ws.send_bytes(half_pcm)
+        message = ws.receive_json()
+
+    assert message == {"text": "হ্যালো", "is_final": True}

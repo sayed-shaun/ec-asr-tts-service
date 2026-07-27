@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     PORT: int = 8000
     API_PATH: str = "/api/v1/asr/transcribe"
 
+    # live-cc buffers raw PCM off the WebSocket and transcribes one chunk at a
+    # time — this is the caption latency (and, since chunks are hard cuts with
+    # no overlap, the rough granularity words can get split at).
+    LIVE_CC_CHUNK_SECONDS: float = 3.0
+
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
 
