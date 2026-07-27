@@ -7,14 +7,16 @@ services:
       - .env
     volumes:
       - hf-cache:/opt/cache/huggingface
-    # Uncomment to enable GPU access (requires nvidia-container-toolkit on the host)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    # Requires nvidia-container-toolkit on the host — needed because
+    # ASR_ACCELERATOR defaults to "cuda". For a CPU-only host, remove this
+    # block and set ASR_ACCELERATOR=cpu in .env.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   hf-cache:

@@ -15,15 +15,15 @@ async def info() -> dict:
     main process — unlike /predict, it does not touch the model itself.
     """
     return {
-        "model": settings.model_name,
+        "model": settings.MODEL_NAME,
         "architecture": "FastConformer-CTC (NeMo)",
         "language": "bn",
-        "sample_rate": settings.sample_rate,
-        "predict_endpoint": settings.api_path,
+        "sample_rate": settings.SAMPLE_RATE,
+        "predict_endpoint": settings.API_PATH,
     }
 
 
-@router.post("/transcribe-file")
+@router.post("/transcribe/file")
 async def transcribe_file(request: Request, file: UploadFile = File(...)) -> JSONResponse:
     """Swagger-friendly file-upload wrapper around POST {api_path}.
 
@@ -44,6 +44,6 @@ async def transcribe_file(request: Request, file: UploadFile = File(...)) -> JSO
 
     transport = httpx.ASGITransport(app=request.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://internal") as client:
-        resp = await client.post(settings.api_path, json=payload, timeout=120)
+        resp = await client.post(settings.API_PATH, json=payload, timeout=120)
 
     return JSONResponse(content=resp.json(), status_code=resp.status_code)

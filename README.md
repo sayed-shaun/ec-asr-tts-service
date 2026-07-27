@@ -8,18 +8,20 @@ served with [LitServe](https://github.com/Lightning-AI/LitServe).
 ## Architecture
 
 ```
-main.py                        # entrypoint: builds & runs the LitServer
+main.py                        # entrypoint: builds & runs the LitServer (imports ONE model's litapi — see below)
 src/
   core/
     config.py                  # pydantic-settings, env-driven (ASR_* vars)
-    logging_config.py          # loguru sinks (console + rotating file)
-  engine/
-    asr_engine.py              # NeMo ASRModel load + transcribe wrapper
-    audio_utils.py             # base64 -> mono float32 @ target sample rate
+    logging.py                  # loguru sinks (console + rotating file)
+  models/
+    conformer/                 # one directory per model architecture — self-contained
+      engine.py                  # NeMo ASRModel load + transcribe wrapper (this architecture's own)
+      litapi.py                   # ASRLitAPI: setup/decode_request/predict/encode_response
+  utils/
+    audio.py                    # base64 -> mono float32 @ target sample rate (shared across all models)
   api/v1/asr/
-    schema.py                  # request/response contract (pydantic)
-    lit_api.py                 # ASRLitAPI: setup/decode_request/predict/encode_response
-    router.py                  # extra FastAPI routes mounted on the LitServer app
+    schema.py                   # request/response contract (pydantic) — only thing this dir holds, besides router
+    router.py                    # extra FastAPI routes mounted on the LitServer app
 tests/
   test_api.py                  # unit tests (engine mocked, no GPU/model needed)
 examples/
@@ -31,6 +33,17 @@ never touches the network or disk. Everything else (`router.py`) is plain
 FastAPI mounted on `server.app` and must **not** call the engine directly,
 since worker processes owning the loaded model are separate from the process
 serving these extra routes.
+
+### Adding a new model architecture
+
+`src/models/<name>/` is meant to be self-contained: `engine.py` (the
+architecture-specific inference wrapper) and `litapi.py` (imports its own
+sibling `engine.py`, never another model's). `schema.py`, `router.py`,
+`config.py`, and `utils/audio.py` are shared across every model — only touch
+those if the new architecture needs a genuinely different request/response
+shape. To actually serve the new model, point `main.py`'s
+`from src.models.<name>.litapi import ASRLitAPI` at it — only one model
+runs per `main.py` process at a time; there's no runtime model switch.
 
 ## Request / response contract
 
@@ -65,6 +78,9 @@ Other endpoints:
 - `GET /health` — LitServe healthcheck (also checks the model is loaded)
 - `GET /info` — LitServe worker/build info
 - `GET /v1/asr/info` — static model metadata
+- `POST /v1/asr/transcribe/file` — multipart file upload (`file=@audio.wav`), for
+  testing from Swagger UI's "Choose File" button; base64-encodes the upload and
+  re-dispatches to `POST /predict` internally — same model path, no duplicated logic
 - `GET /docs` — interactive Swagger UI
 
 ## Setup

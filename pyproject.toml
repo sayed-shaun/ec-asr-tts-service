@@ -1,26 +1,21 @@
 [project]
 name = "bangla-asr-pipeline"
 version = "0.1.0"
-description = "Bengali speech-to-text service built on hishab/titu_stt_bn_fastconformer, served with LitServe"
+description = "Bengali speech-to-text service"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1.0",
-    # NeMo ASR toolkit — provides hishab/titu_stt_bn_fastconformer (FastConformer CTC)
     "nemo_toolkit[asr]>=2.0.0",
-    # Model serving
     "litserve>=0.2.9",
-    # Audio decoding/resampling
     "librosa>=0.10.0",
     "soundfile>=0.12.1",
-    # API layer
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.6.0",
     "pydantic-settings>=2.2.0",
     "python-dotenv>=1.0.0",
-    "python-multipart>=0.0.9",  # required by FastAPI for UploadFile/File(...) form parsing
-    "httpx>=0.27.0",  # in-process ASGI call used by the /v1/asr/transcribe-file convenience route
-    # Utilities
+    "python-multipart>=0.0.9",  
+    "httpx>=0.27.0",  
     "loguru>=0.7.2",
     "numpy>=1.24.0",
     "requests>=2.31.0",
@@ -29,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "httpx2>=2.9.1",  # starlette.testclient prefers this over httpx; avoids its deprecation warning
 ]
 triton = [
     # Used by triton/export_to_triton.py to export NeMo checkpoints to ONNX
@@ -41,3 +37,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # librosa -> audioread's pure-Python fallback decoder imports these unconditionally;
+    # removed from the stdlib in Python 3.13, audioread falls back to the standard-aifc/
+    # standard-sunau backport packages, which warn on every import. Nothing on our side
+    # to fix — nothing in this repo touches aifc/sunau directly.
+    "ignore:aifc was removed in Python 3.13:DeprecationWarning",
+    "ignore:sunau was removed in Python 3.13:DeprecationWarning",
+]
