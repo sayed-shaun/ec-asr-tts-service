@@ -1,37 +1,26 @@
-# ---- builder: compile/install into a venv, build tools never reach the runtime image ----
-FROM python:3.14-slim AS builder
+FROM pytorch/pytorch:2.9.1-cuda13.0-cudnn9-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/cache/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-WORKDIR /app
-COPY pyproject.toml .
-COPY src/ src/
-RUN pip install --no-cache-dir .
-
-# ---- runtime: just the venv + what's needed to actually serve requests ----
-FROM python:3.14-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    HF_HOME=/opt/cache/huggingface \
-    PATH="/opt/venv/bin:$PATH"
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /opt/venv /opt/venv
+
+# This base image already has torch + CUDA 13 + cuDNN 9 installed — pip sees
+# our own "torch>=2.1.0" is already satisfied and skips it entirely, so this
+# only downloads nemo_toolkit and everything else. That's most of the weight
+# a from-scratch `pip install torch nemo_toolkit[asr]` would otherwise pull.
+COPY pyproject.toml .
+COPY src/ src/
+RUN pip install --no-cache-dir .
+
 COPY . .
 
 EXPOSE 8000

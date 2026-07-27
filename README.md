@@ -158,6 +158,16 @@ GPU acceleration is on by default (`deploy.resources` in `docker-compose.yml`,
 `ASR_ACCELERATOR=cuda`) and requires `nvidia-container-toolkit` on the host;
 remove that block and set `ASR_ACCELERATOR=cpu` for a CPU-only host.
 
+The `Dockerfile` builds `FROM pytorch/pytorch:*-cuda*-cudnn*-runtime` rather
+than a plain Python image — that base already has torch + CUDA + cuDNN
+installed, so `pip install .` sees `torch>=2.1.0` already satisfied and skips
+it entirely, installing only `nemo_toolkit[asr]` and the rest. Measured: pip
+install time drops from ~19 minutes to ~2 minutes. (We also checked NVIDIA's
+official NGC NeMo container as a base — it bundles NeMo itself, but at ~18GB
+compressed it isn't meaningfully smaller than building from scratch, so it's
+not used here.) If you bump the base image tag, keep the CUDA version
+compatible with the host driver.
+
 ## Configuration
 
 All settings are env vars prefixed `ASR_` (see `.env.example`), e.g.
