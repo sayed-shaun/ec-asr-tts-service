@@ -30,6 +30,11 @@ triton = [
     # Used by triton/export_to_triton.py to export NeMo checkpoints to ONNX
     "onnx>=1.15.0",
 ]
+denoise = [
+    # Only needed when ASR_DENOISE=true — see config.py for the measured
+    # tradeoffs before enabling it.
+    "noisereduce>=3.0.0",
+]
 
 [build-system]
 requires = ["hatchling"]
