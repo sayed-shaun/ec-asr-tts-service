@@ -7,6 +7,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ASR_", env_file=".env", extra="ignore")
 
     MODEL_NAME: str = "hishab/titu_stt_bn_fastconformer"
+
+    # Human-readable label for GET /v1/asr/info. Not derived from MODEL_NAME
+    # automatically: that route runs in the main process and must not touch
+    # the engine (the loaded model lives in separate LitServe worker
+    # processes — see router.py), so it can't introspect the model's real
+    # class. Set this alongside MODEL_NAME when you change it, or /v1/asr/info
+    # reports the previous model's architecture.
+    MODEL_ARCHITECTURE: str = "FastConformer-CTC (NeMo)"
+
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
 
     # LitServe's "auto" device count shells out to `nvidia-smi -L` (not
@@ -28,6 +37,25 @@ class Settings(BaseSettings):
     TRANSCRIBE_BATCH_SIZE: int = 4
 
     SAMPLE_RATE: int = 16000
+
+    # Spectral-gating denoise (noisereduce) applied to every decoded waveform
+    # before transcription. Off by default: measured against this pipeline's
+    # own sample data, it rewrote the transcript on every file (word count rose
+    # on all 8, 0 produced text identical to undenoised) and only improved an
+    # invalid-Bengali-orthography proxy in aggregate (79->69), regressing on
+    # 2 of 8 files individually. Whether the added words are recovered speech
+    # or denoise artifacts is unverified — no ground truth to score against.
+    # Only enable if your real input is noisier than the sample data and you
+    # can verify with actual WER, not this proxy.
+    DENOISE: bool = False
+
+    # stationary=True measured better than False (non-stationary) on this
+    # pipeline's sample data (79->69 vs 79->84 on the same orthography proxy).
+    # Non-stationary re-estimates the noise floor continuously, which is
+    # usually the right choice for real recordings with time-varying
+    # background noise — re-measure before trusting the stationary default
+    # if your input doesn't resemble clean-ish broadcast narration.
+    DENOISE_STATIONARY: bool = True
 
     # This checkpoint was trained on clips up to ~18.5s; longer audio is split
     # into segments of this length before transcription to avoid the encoder's
