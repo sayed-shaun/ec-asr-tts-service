@@ -19,7 +19,9 @@ WORKDIR /app
 # a from-scratch `pip install torch nemo_toolkit[asr]` would otherwise pull.
 COPY pyproject.toml .
 COPY src/ src/
-RUN pip install --no-cache-dir .
+# ".[denoise]" so ASR_DENOISE can be toggled at runtime (env var) without a
+# rebuild — noisereduce (numpy/scipy-based, no extra ML weight) ships either way.
+RUN pip install --no-cache-dir ".[denoise]"
 
 COPY . .
 
