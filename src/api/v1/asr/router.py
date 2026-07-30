@@ -16,7 +16,7 @@ async def info() -> dict:
     """
     return {
         "model": settings.MODEL_NAME,
-        "architecture": "FastConformer-CTC (NeMo)",
+        "architecture": settings.MODEL_ARCHITECTURE,
         "language": "bn",
         "sample_rate": settings.SAMPLE_RATE,
         "predict_endpoint": settings.API_PATH,
