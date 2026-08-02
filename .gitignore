@@ -13,6 +13,7 @@ nemo_experiments/
 *.nemo
 .cache/
 data/
+outputs/
 
 # Data files (benchmark outputs, exports, etc.) — not source, don't track
 *.json
