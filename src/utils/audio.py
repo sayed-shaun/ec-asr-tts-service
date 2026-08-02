@@ -13,6 +13,12 @@ from src.core.config import settings
 def decode_base64_audio(audio_content: str, target_sr: int) -> np.ndarray:
     """Decode a base64-encoded audio blob (wav/flac/ogg/mp3/webm/...) into a
     mono float32 waveform resampled to `target_sr`.
+
+    Round-trips through a temp file rather than an in-memory buffer:
+    librosa.load can't decode compressed containers (webm/opus, mp4, ...) from
+    an in-memory BytesIO, soundfile doesn't support them at all, and its
+    audioread/ffmpeg fallback needs a real file path to shell out to, not a
+    stream. A temp file makes every format ffmpeg supports work.
     """
     try:
         raw_bytes = base64.b64decode(audio_content, validate=True)
@@ -22,11 +28,6 @@ def decode_base64_audio(audio_content: str, target_sr: int) -> np.ndarray:
     if not raw_bytes:
         raise ValueError("Decoded audio content is empty")
 
-    # librosa.load can't decode compressed containers (webm/opus, mp4, ...)
-    # from an in-memory BytesIO — soundfile doesn't support them at all, and
-    # its audioread/ffmpeg fallback needs a real file path to shell out to,
-    # not a stream. Round-tripping through a temp file makes every format
-    # ffmpeg supports work, not just what soundfile can read from a buffer.
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
@@ -54,9 +55,7 @@ def denoise(waveform: np.ndarray, sample_rate: int) -> np.ndarray:
     """
     import noisereduce as nr
 
-    reduced = nr.reduce_noise(
-        y=waveform, sr=sample_rate, stationary=settings.DENOISE_STATIONARY
-    )
+    reduced = nr.reduce_noise(y=waveform, sr=sample_rate, stationary=settings.DENOISE_STATIONARY)
     return reduced.astype(np.float32)
 
 
@@ -67,17 +66,17 @@ def warm_audio_decoder(target_sr: int) -> None:
     purely in lazy imports and codec/resampler setup, vs ~0.6ms afterwards.
     Without this the first real request eats that cost. Best-effort: a failed
     warmup must not stop a worker from coming up.
+
+    Uses target_sr // 2 as the WAV frame rate (deliberately not target_sr) to
+    also exercise the resampler, which has its own one-off init cost on the
+    first non-passthrough conversion.
     """
-    samples = np.zeros(target_sr // 10, dtype=np.int16)  # 100ms of silence
+    samples = np.zeros(target_sr // 10, dtype=np.int16)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
-        # Deliberately not target_sr: exercises the resampler too, which has
-        # its own one-off init cost on the first non-passthrough conversion.
         wav_file.setframerate(target_sr // 2)
         wav_file.writeframes(samples.tobytes())
 
-    decode_base64_audio(
-        base64.b64encode(buf.getvalue()).decode("utf-8"), target_sr=target_sr
-    )
+    decode_base64_audio(base64.b64encode(buf.getvalue()).decode("utf-8"), target_sr=target_sr)

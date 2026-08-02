@@ -45,6 +45,12 @@ def build_payload(audio_bytes: bytes) -> dict:
 
 
 def call_endpoint(url: str, payload: dict, timeout: float) -> EndpointResult:
+    """POST payload to an ASR endpoint and time it.
+
+    Catches RequestException (network/timeout/HTTP errors) and ValueError
+    (resp.json() on a non-JSON body) broadly-but-specifically so one flaky
+    endpoint doesn't abort the whole comparison run.
+    """
     start = time.time()
     try:
         resp = requests.post(url, json=payload, timeout=timeout)
@@ -59,9 +65,6 @@ def call_endpoint(url: str, payload: dict, timeout: float) -> EndpointResult:
             wall_clock_seconds=wall_clock,
         )
     except (requests.RequestException, ValueError) as exc:
-        # RequestException: network/timeout/HTTP errors. ValueError: resp.json() on a
-        # non-JSON body. Caught broadly-but-specifically so one flaky endpoint doesn't
-        # abort the whole comparison run.
         return EndpointResult(ok=False, wall_clock_seconds=time.time() - start, error=str(exc))
 
 

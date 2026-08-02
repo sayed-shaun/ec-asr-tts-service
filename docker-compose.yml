@@ -1,15 +1,18 @@
 services:
-  ec-asr-service:
-    build: .
-    ports:
-      - "8000:8000"
+  litserver:
+    build:
+      context: .
+      dockerfile: litserver.Dockerfile
     env_file:
       - .env
     volumes:
       - hf-cache:/opt/cache/huggingface
-    # Requires nvidia-container-toolkit on the host — needed because
-    # ASR_ACCELERATOR defaults to "cuda". For a CPU-only host, remove this
-    # block and set ASR_ACCELERATOR=cpu in .env.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${ASR_LITSERVE_PORT:-8001}/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 180s
     deploy:
       resources:
         reservations:
@@ -17,6 +20,20 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: fastapi.Dockerfile
+    ports:
+      - "${ASR_API_PORT:-8000}:${ASR_API_PORT:-8000}"
+    env_file:
+      - .env
+    environment:
+      - ASR_LITSERVE_HOST=litserver
+    depends_on:
+      litserver:
+        condition: service_healthy
 
 volumes:
   hf-cache:

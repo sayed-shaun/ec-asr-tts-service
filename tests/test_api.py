@@ -7,6 +7,7 @@ import wave
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import numpy as np
 import pytest
 from fastapi import FastAPI
@@ -17,8 +18,8 @@ from src.api.v1.asr.router import router as asr_router
 from src.api.v1.asr.schema import AsrRequest
 from src.api.v1.live_cc.router import router as live_cc_router
 from src.core.config import settings
-from src.models.conformer.engine import ASREngine
-from src.models.conformer.litapi import ASRLitAPI
+from src.litserver.engine import ASREngine
+from src.litserver.litapi import ASRLitAPI
 from src.utils.audio import decode_base64_audio, denoise
 
 
@@ -65,9 +66,10 @@ def test_decode_base64_audio_rejects_garbage():
 
 
 def test_decode_base64_audio_skips_denoise_by_default(monkeypatch):
-    # ASR_DENOISE defaults to False — measured to rewrite the transcript on
-    # every file tested (word count rose on all of them, none matched the
-    # undenoised text), so it must stay opt-in, not silently applied.
+    """ASR_DENOISE defaults to False — measured to rewrite the transcript on
+    every file tested (word count rose on all of them, none matched the
+    undenoised text), so it must stay opt-in, not silently applied.
+    """
     called = []
     monkeypatch.setattr("src.utils.audio.denoise", lambda w, sr: called.append(1) or w)
     decode_base64_audio(_make_wav_base64(), target_sr=16000)
@@ -91,10 +93,11 @@ def test_denoise_preserves_dtype_and_length():
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
 def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
-    # Regression test: librosa can't decode compressed containers (webm/opus,
-    # what MediaRecorder produces in browsers) from an in-memory BytesIO —
-    # soundfile doesn't support the format at all, and its audioread/ffmpeg
-    # fallback needs a real file path, not a stream.
+    """Regression test: librosa can't decode compressed containers (webm/opus,
+    what MediaRecorder produces in browsers) from an in-memory BytesIO —
+    soundfile doesn't support the format at all, and its audioread/ffmpeg
+    fallback needs a real file path, not a stream.
+    """
     with tempfile.TemporaryDirectory() as tmp_dir:
         webm_path = Path(tmp_dir) / "test.webm"
         subprocess.run(
@@ -110,7 +113,7 @@ def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
 
     assert waveform.dtype == np.float32
     assert waveform.size > 0
-    assert after == before  # no leftover temp file
+    assert after == before
 
 
 def test_asr_request_rejects_empty_audio_list():
@@ -187,14 +190,26 @@ def test_asr_engine_respects_custom_sample_rate_for_segment_length():
 
 
 @pytest.fixture
-def live_cc_client():
-    app = FastAPI()
-    app.include_router(live_cc_router)
+def live_cc_client(monkeypatch):
+    """live_cc_router now calls the LitServe model server over a real HTTP
+    client (see router.py) rather than an in-process ASGI transport, so the
+    fake predict endpoint below lives on a separate app; the router's
+    httpx.AsyncClient is monkeypatched to reach it in-process instead of
+    opening a real socket, keeping the test hermetic.
+    """
+    predict_app = FastAPI()
 
-    @app.post(settings.API_PATH)
+    @predict_app.post(settings.API_PATH)
     async def fake_predict(payload: dict) -> dict:
         return {"taskType": "asr", "output": [{"source": "হ্যালো"}], "time_taken": 0.1}
 
+    def fake_async_client(*args, **kwargs):
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=predict_app), base_url="http://internal")
+
+    monkeypatch.setattr("src.api.v1.live_cc.router.httpx.AsyncClient", fake_async_client)
+
+    app = FastAPI()
+    app.include_router(live_cc_router)
     return TestClient(app)
 
 
@@ -210,8 +225,9 @@ def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
 
 
 def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
-    # Half a chunk (1.5s) already crosses one interim step (1.0s), so the first
-    # half triggers an interim caption before the second half finalizes it.
+    """Half a chunk (1.5s) already crosses one interim step (1.0s), so the
+    first half triggers an interim caption before the second half finalizes it.
+    """
     chunk_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS)
     half_pcm = np.zeros(chunk_samples // 2, dtype=np.int16).tobytes()
 
@@ -226,6 +242,9 @@ def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
 
 
 def test_live_cc_ws_emits_interim_captions_before_final(live_cc_client):
+    """Steps through interim intervals, then sends the remainder to cross the
+    final chunk boundary.
+    """
     interim_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_INTERIM_INTERVAL_SECONDS)
     step_pcm = np.zeros(interim_samples, dtype=np.int16).tobytes()
 
@@ -239,7 +258,6 @@ def test_live_cc_ws_emits_interim_captions_before_final(live_cc_client):
             ws.send_bytes(step_pcm)
             messages.append(ws.receive_json())
 
-        # Send the remainder to cross the final chunk boundary.
         remaining_samples = int(settings.LIVE_CC_INPUT_SAMPLE_RATE * chunk_seconds) - interim_samples * num_interim_steps
         ws.send_bytes(np.zeros(remaining_samples, dtype=np.int16).tobytes())
         messages.append(ws.receive_json())

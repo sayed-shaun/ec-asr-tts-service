@@ -7,9 +7,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from src.core.config import settings
 
-router = APIRouter(prefix="/v1/live-cc", tags=["live-cc"])
+router = APIRouter(prefix="/v1/live-cc", tags=["Live CC"])
 
-_PCM_SAMPLE_WIDTH_BYTES = 2  # 16-bit PCM
+_PCM_SAMPLE_WIDTH_BYTES = 2
 
 
 def _pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int) -> bytes:
@@ -49,9 +49,10 @@ async def live_cc_ws(websocket: WebSocket) -> None:
     playback speed) rather than fail loudly.
 
     Reuses the same model as batch requests by re-dispatching each buffered
-    chunk to settings.API_PATH over an in-process ASGI call (same pattern as
-    /v1/asr/transcribe/file) — this process never holds the model itself,
-    that lives in LitServe's own worker processes.
+    chunk to settings.API_PATH as a real HTTP request against the LitServe
+    model server (same pattern as /v1/asr/transcribe/file) — this process
+    never holds the model itself, that lives in LitServe's own worker
+    processes.
     """
     await websocket.accept()
 
@@ -62,8 +63,8 @@ async def live_cc_ws(websocket: WebSocket) -> None:
     buffer = bytearray()
     next_interim_at = interim_byte_step
 
-    transport = httpx.ASGITransport(app=websocket.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://internal") as client:
+    litserve_base_url = f"http://{settings.LITSERVE_HOST}:{settings.LITSERVE_PORT}"
+    async with httpx.AsyncClient(base_url=litserve_base_url) as client:
         try:
             while True:
                 buffer.extend(await websocket.receive_bytes())
