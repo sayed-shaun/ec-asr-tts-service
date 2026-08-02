@@ -12,7 +12,9 @@ class AsrConfig(BaseModel):
 
 
 class AudioContent(BaseModel):
-    audioContent: str = Field(..., description="Base64-encoded audio (wav/flac/ogg/mp3)")
+    audioContent: str = Field(
+        ..., description="Base64-encoded audio (wav/flac/ogg/mp3)"
+    )
 
 
 class AsrRequest(BaseModel):

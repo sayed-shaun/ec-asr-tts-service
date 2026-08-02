@@ -10,14 +10,28 @@ from src.core.logging import configure_logging
 
 
 def create_gateway_app() -> FastAPI:
-    """Build the public-facing pure FastAPI app: ASR + live-cc routers and the static test GUI.
+    """Build the public-facing pure FastAPI app: ASR + live-cc routers and the
+    static test GUI.
 
     No model is loaded in this process — it's a thin proxy in front of the
     LitServe model server (see run_litserve.py), reached over real HTTP at
-    ASR_LITSERVE_HOST:ASR_LITSERVE_PORT. /static serves the manual test GUI
-    for /predict and /v1/live-cc/ws (static/index.html).
+    litserver:8000 (fixed, see src.core.config). /static serves the manual
+    test GUI for /predict and /v1/live-cc/ws (static/index.html).
     """
     app = FastAPI()
+
+    @app.get("/api/v1/asr/info")
+    async def info() -> dict:
+        """Static metadata about the deployed model/endpoint. Safe to call
+        from the main process — unlike /predict, it does not touch the
+        model itself.
+        """
+        return {
+            "model": settings.MODEL_NAME,
+            "language": "bn",
+            "sample_rate": settings.SAMPLE_RATE,
+        }
+
     app.include_router(asr_router)
     app.include_router(live_cc_router)
     app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -27,5 +41,5 @@ def create_gateway_app() -> FastAPI:
 if __name__ == "__main__":
     configure_logging()
     gateway_app = create_gateway_app()
-    logger.info(f"Starting Bangla ASR gateway on {settings.HOST}:{settings.API_PORT}")
-    uvicorn.run(gateway_app, host=settings.HOST, port=settings.API_PORT)
+    logger.info(f"Starting Bangla ASR gateway on 0.0.0.0:{settings.GATEWAY_PORT}")
+    uvicorn.run(gateway_app, host="0.0.0.0", port=settings.GATEWAY_PORT)
