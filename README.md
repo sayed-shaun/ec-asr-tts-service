@@ -4,36 +4,21 @@ Bengali speech-to-text service. Model: [hishab/titu_stt_bn_fastconformer](https:
 
 ## Architecture
 
-Two independent services, split by concern — separate processes, separate containers in Docker:
+Two independent services — separate processes, separate containers:
 
-- **LitServe model server** (`run_litserve.py`, built from `src/litserver/`) — holds the model, GPU-bound. Always binds `0.0.0.0:8000` inside its own container; not meant to be reached by anything other than the gateway.
-- **Gateway** (`main.py`) — pure FastAPI, no model loaded in-process. This is the public entrypoint, always binding `0.0.0.0:GATEWAY_PORT` (`8000` by default — the only network setting left configurable, since it's the one thing that genuinely varies per deployment). It reaches the LitServe server over a real HTTP call (`httpx.AsyncClient`) at a **fixed** address: `litserver:8000` (see `src/core/config.py`) — not env-configurable, since the two services' wiring to each other is an implementation detail, not something a deployment needs to vary.
+- **LitServe model server** (`run_litserve.py`) — holds the model, GPU-bound. Binds `0.0.0.0:8000` internally.
+- **Gateway** (`main.py`) — pure FastAPI, no model loaded in-process. Public entrypoint, binds `0.0.0.0:GATEWAY_PORT` (`8000` by default — the only network setting that's actually configurable). Reaches LitServe over real HTTP at a **fixed** `litserver:8000` (see `src/core/config.py`).
 
-`litserver:8000` assumes Docker Compose's network (the `litserver` hostname resolves via Docker's internal DNS — see `docker-compose.yml`'s shared `asr-net` network). Running the two processes bare on one host without Compose (two terminals) needs `litserver` to resolve to `127.0.0.1`, e.g. by adding this to `/etc/hosts`:
-
-```
-127.0.0.1 litserver
-```
-
-`LITSERVE_PORT` is also fixed at `8000` — the same as `GATEWAY_PORT`'s default. Two containers can both use `8000` fine (separate network namespaces), but two bare processes on **one host** can't both bind `8000` — set `GATEWAY_PORT` to something else (e.g. `8080`) for local two-terminal dev outside Docker.
-
-Run them as two separate commands — there is no single entrypoint that starts both:
-
-```bash
-python run_litserve.py                    # terminal 1 — model server, binds 8000
-GATEWAY_PORT=8080 python main.py       # terminal 2 — gateway, binds 8080 to avoid the clash
-```
-
-In Docker Compose, the `gateway` service waits on the `litserver` service's healthcheck before starting (model load can take a while on first run — see `docker-compose.yml`).
+`litserver` resolves via Docker Compose's internal DNS (`asr-net` network, see `docker-compose.yml`), and `gateway` waits on `litserver`'s healthcheck before starting.
 
 ```mermaid
 flowchart LR
     Client(["Client / static test page"])
 
     subgraph Gateway["Gateway process — public — 0.0.0.0:GATEWAY_PORT"]
-        Info["GET /v1/asr/info"]
-        File["POST /v1/asr/transcribe/file"]
-        WS["WS /v1/live-cc/ws"]
+        Info["GET /api/v1/asr/info"]
+        File["POST /api/v1/asr/transcribe/file"]
+        WS["WS /api/v1/live-cc/ws"]
         Static["/static (test GUI)"]
     end
 
@@ -54,7 +39,7 @@ flowchart LR
     Predict --> LitAPI --> Engine
 ```
 
-**Note:** `POST /predict` (the raw JSON inference endpoint LitServe itself exposes) only runs on the internal LitServe port — it is not proxied through the gateway. Externally, use `POST /v1/asr/transcribe/file` (multipart upload) instead; the gateway forwards that to the internal endpoint for you. If you need raw base64-JSON access from outside the container, either open the internal port at your own risk or add a passthrough route to the gateway.
+**Note:** `POST /predict` (the raw JSON inference endpoint LitServe itself exposes) only runs on the internal LitServe port — it is not proxied through the gateway. Externally, use `POST /api/v1/asr/transcribe/file` (multipart upload) instead; the gateway forwards that to the internal endpoint for you. If you need raw base64-JSON access from outside the container, either open the internal port at your own risk or add a passthrough route to the gateway.
 
 ## Structure
 
@@ -77,9 +62,9 @@ flowchart LR
 │   ├── utils/
 │   │   └── audio.py               # base64 -> waveform decode/resample
 │   └── api/v1/
-│       ├── asr/router.py          # /v1/asr/* routes (gateway; proxies to LitServe over HTTP)
+│       ├── asr/router.py          # /api/v1/asr/* routes (gateway; proxies to LitServe over HTTP)
 │       ├── asr/schema.py          # request/response models
-│       └── live_cc/router.py      # /v1/live-cc/ws (gateway; proxies to LitServe over HTTP)
+│       └── live_cc/router.py      # /api/v1/live-cc/ws (gateway; proxies to LitServe over HTTP)
 ├── static/index.html              # manual test page
 ├── tests/test_api.py              # unit tests (model mocked)
 ├── examples/client_example.py     # minimal Python client
@@ -98,17 +83,6 @@ cp .env.example .env
 
 Model license: **CC-BY-NC-4.0** (non-commercial). `nemo_toolkit[asr]` is a heavy install — several minutes, several GB. `pip install -e .` alone gets you the gateway's dependencies only (fastapi/httpx/uvicorn — no torch/nemo). To also run the model server locally, install the `serve` extra: `pip install -e ".[serve]"`.
 
-## Run
-
-```bash
-python run_litserve.py   # terminal 1
-python main.py           # terminal 2
-```
-
-First request downloads the checkpoint (cached under `$HF_HOME` / `~/.cache/huggingface`) — slow once, fast after. The gateway will return connection errors for `/v1/asr/transcribe/file` and `/v1/live-cc/ws` until `run_litserve.py` has finished loading the model — there's no readiness wait outside of Docker Compose (see below), so give it a moment on first run.
-
-Test page: `http://localhost:8000/static/index.html`
-
 ## Docker
 
 ```bash
@@ -120,7 +94,9 @@ Two separate images, built from two separate Dockerfiles:
 - `litserver` — built from `litserver.Dockerfile` (CUDA/PyTorch base, `torch`/`nemo_toolkit`/`litserve` installed via the `serve` extra). GPU-bound, several GB.
 - `gateway` — built from `fastapi.Dockerfile` (`python:3.12-slim`, base dependencies only — no ML deps at all). Small, fast to build/deploy/scale independently of the model image.
 
-`gateway` won't start accepting traffic until `litserver`'s healthcheck passes (`GET /health`), which covers the model-load wait automatically — no manual readiness polling needed.
+`gateway` won't start accepting traffic until `litserver`'s healthcheck passes (`GET /health`), which covers the model-load wait automatically (first request otherwise pays the checkpoint download, cached under `$HF_HOME` / `~/.cache/huggingface`) — no manual readiness polling needed.
+
+Test page: `http://localhost:8000/static/index.html`
 
 GPU is on by default (`ACCELERATOR=cuda`, requires `nvidia-container-toolkit`). For CPU-only, remove the `deploy.resources` block from the `litserver` service in `docker-compose.yml` and set `ACCELERATOR=cpu`.
 
@@ -137,16 +113,16 @@ pytest -q
 
 | | |
 |---|---|
-| `POST /v1/asr/transcribe/file` | multipart file upload (gateway, public) |
-| `WS /v1/live-cc/ws` | streamed captions, raw 16-bit PCM (gateway, public) |
-| `GET /v1/asr/info` | model metadata (gateway, public) |
+| `POST /api/v1/asr/transcribe/file` | multipart file upload (gateway, public) |
+| `WS /api/v1/live-cc/ws` | streamed captions, raw 16-bit PCM (gateway, public) |
+| `GET /api/v1/asr/info` | model metadata (gateway, public) |
 | `GET /health` | LitServe healthcheck (internal) |
 | `GET /docs` | Swagger UI (gateway) — WebSocket routes never appear here, OpenAPI has no way to describe them |
 | `POST /predict` | raw JSON inference — **internal LitServe only**, not exposed on the gateway |
 
 `/predict` is LitServe's own default route (not configurable — see `main.py`'s `PREDICT_PATH` and `src/litserver/server.py`, which no longer overrides it) — a fixed implementation detail between the gateway and LitServe, not something a deployment needs to vary.
 
-### Inference request (internal `/predict`, and what `/v1/asr/transcribe/file` builds internally)
+### Inference request (internal `/predict`, and what `/api/v1/asr/transcribe/file` builds internally)
 
 ```json
 {
@@ -217,7 +193,7 @@ All settings are plain env vars (no prefix). See `.env.example` for the full lis
 python examples/client_example.py path/to/audio.wav
 ```
 
-Currently POSTs to `/predict`, not a real route on this service (public or internal) — broken until updated to target `/v1/asr/transcribe/file` (or the internal `/predict` if run against the LitServe port directly).
+Currently POSTs to `/predict`, not a real route on this service (public or internal) — broken until updated to target `/api/v1/asr/transcribe/file` (or the internal `/predict` if run against the LitServe port directly).
 
 ## Evaluating against ground truth
 
@@ -232,9 +208,20 @@ python scripts/benchmark.py --api-url http://127.0.0.1:8000/predict \
     --data-dir data/eval_fleurs_bn --output-dir benchmark_output
 ```
 
-`download_eval_data.py` pulls the full bn_in test + validation splits (a few hundred utterances each, not train) from [FLEURS](https://huggingface.co/datasets/google/fleurs) (CC-BY-4.0) via the `datasets` library, writing a single `data.tar` (one archive member per utterance, not hundreds of loose files) + `ground_truth.json` mapping tar member name -> transcript. Member names are `fleurs_bn_{split}_{position:04d}.wav` — deliberately not FLEURS' own `id` field, which is **not unique within a split** (confirmed: the validation split has 402 rows but only 150 distinct ids, which would silently overwrite 252 files if used). `benchmark.py` reads audio straight out of `data.tar` on the fly (via `tarfile`) — no extraction step.
-
 `benchmark.py` writes two files to `--output-dir`:
 
 - `predictions.json` — per-utterance reference, hypothesis, per-file WER/CER, latency, and any request error.
 - `report.txt` — corpus-level WER/CER/MER/WIL (aggregated over the whole set, not an average of per-file rates) and latency stats. Per-file WER/CER lives in `predictions.json`, not here.
+
+### Evaluation dataset
+
+[FLEURS](https://huggingface.co/datasets/google/fleurs) (Few-shot Learning Evaluation of Universal Representations of Speech), Google's multilingual speech benchmark spanning 100+ languages — read-aloud, professionally recorded sentences drawn from the FLoRes machine-translation dataset, so content is naturally-worded but not spontaneous/conversational speech. This project uses the `bn_in` (Bengali, India locale) config, license **CC-BY-4.0**.
+
+`download_eval_data.py` pulls the `test` (920 utterances) and `validation` (402 utterances) splits via the `datasets` library — not `train`, which is a training set, not held-out eval data. Audio is 16 kHz mono, 32-bit float WAV, single utterances a few seconds to ~15s long, each with a `transcription` (normalized) and `raw_transcription` (original casing/punctuation) — see "what is the difference" note below.
+
+Output layout in `--data-dir`:
+
+- `data.tar` — one archive member per utterance (`fleurs_bn_{split}_{position:04d}.wav`), not hundreds of loose files. `benchmark.py` reads audio straight out of it on the fly via `tarfile` — no extraction step, and reads happen outside `benchmark.py`'s per-request latency timer so they don't skew the report.
+- `ground_truth.json` — tar member name -> `{transcription, raw_transcription}`, merged across both splits.
+
+Member names are the loop position, not FLEURS' own `id` field — the `id` field is **not unique within a split** (confirmed: `validation` has 402 rows but only 150 distinct ids, which would silently overwrite 252 files if used as the filename).
