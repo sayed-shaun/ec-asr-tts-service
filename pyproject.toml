@@ -40,7 +40,7 @@ speaker = [
     "resemblyzer>=0.1.4",
 ]
 eval = [
-    "pyarrow>=14.0.0",
+    "datasets>=2.19.0",
     "jiwer>=3.0.0",
     "tqdm>=4.66.0",
     "soundfile>=0.12.1",
