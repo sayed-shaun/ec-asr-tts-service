@@ -50,12 +50,14 @@ def decode_base64_audio(audio_content: str, target_sr: int) -> np.ndarray:
 
 
 def denoise(waveform: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Spectral-gating noise reduction (see ASR_DENOISE in config.py for the
+    """Spectral-gating noise reduction (see DENOISE in config.py for the
     measured tradeoffs before enabling this).
     """
     import noisereduce as nr
 
-    reduced = nr.reduce_noise(y=waveform, sr=sample_rate, stationary=settings.DENOISE_STATIONARY)
+    reduced = nr.reduce_noise(
+        y=waveform, sr=sample_rate, stationary=settings.DENOISE_STATIONARY
+    )
     return reduced.astype(np.float32)
 
 
@@ -79,4 +81,6 @@ def warm_audio_decoder(target_sr: int) -> None:
         wav_file.setframerate(target_sr // 2)
         wav_file.writeframes(samples.tobytes())
 
-    decode_base64_audio(base64.b64encode(buf.getvalue()).decode("utf-8"), target_sr=target_sr)
+    decode_base64_audio(
+        base64.b64encode(buf.getvalue()).decode("utf-8"), target_sr=target_sr
+    )

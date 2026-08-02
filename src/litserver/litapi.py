@@ -11,7 +11,9 @@ from src.utils.audio import decode_base64_audio, warm_audio_decoder
 
 
 class ASRLitAPI(ls.LitAPI):
-    """Serves hishab/titu_stt_bn_fastconformer (NeMo FastConformer CTC) over HTTP."""
+    """Serves hishab/titu_stt_bn_fastconformer (NeMo FastConformer CTC) over
+    HTTP.
+    """
 
     def setup(self, device: str) -> None:
         """Load the model engine and warm the audio decoder.
@@ -31,12 +33,17 @@ class ASRLitAPI(ls.LitAPI):
             warm_audio_decoder(settings.SAMPLE_RATE)
             logger.info("Audio decoder warmed up")
         except Exception as exc:
-            logger.warning(f"Audio decoder warmup failed (continuing anyway): {exc}")
+            logger.warning(
+                f"Audio decoder warmup failed (continuing anyway): {exc}"
+            )
 
     def decode_request(self, request: AsrRequest) -> dict:
         sample_rate = request.config.samplingRate or settings.SAMPLE_RATE
         try:
-            audios = [decode_base64_audio(item.audioContent, target_sr=sample_rate) for item in request.audio]
+            audios = [
+                decode_base64_audio(item.audioContent, target_sr=sample_rate)
+                for item in request.audio
+            ]
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {

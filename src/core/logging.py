@@ -8,7 +8,10 @@ _configured = False
 
 
 def configure_logging() -> None:
-    """Configure loguru sinks. Safe to call multiple times (no-op after the first)."""
+    """Configure loguru sinks.
+
+    Safe to call multiple times (no-op after the first).
+    """
     global _configured
     if _configured:
         return
@@ -18,8 +21,10 @@ def configure_logging() -> None:
     logger.add(
         f"{settings.LOG_DIR}/{{time:YYYY-MM-DD}}.log",
         format=(
-            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | "
-            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> "
+            "- <level>{message}</level>"
         ),
         level=settings.LOG_LEVEL,
         rotation="00:00",
