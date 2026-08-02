@@ -1,6 +1,17 @@
 # Bangla ASR Pipeline
 
-Bengali speech-to-text service. Architecture: NeMo Conformer-CTC (default checkpoint: [hishab/titu_stt_bn_fastconformer](https://huggingface.co/hishab/titu_stt_bn_fastconformer), configurable via `MODEL_NAME` — see "Config" below). Served with [LitServe](https://github.com/Lightning-AI/LitServe).
+A Bengali ASR (automatic speech recognition) pipeline: a NeMo Conformer-CTC model served with [LitServe](https://github.com/Lightning-AI/LitServe), fronted by a FastAPI gateway. Supports both one-shot file transcription and streamed live captions over WebSocket, and ships with a benchmark tool for measuring accuracy (WER/CER) against labeled ground truth.
+
+## Current Model
+
+Default checkpoint: [hishab/titu_stt_bn_fastconformer](https://huggingface.co/hishab/titu_stt_bn_fastconformer) — a NeMo FastConformer-CTC model fine-tuned for Bengali (`bn`), CTC decoding, 16 kHz mono input (`SAMPLE_RATE`). Architecture: [Conformer](https://arxiv.org/abs/2005.08100) (Gulati et al., 2020) — convolution-augmented Transformer, FastConformer being NeMo's depthwise-strided variant for faster inference. License **CC-BY-NC-4.0** (non-commercial).
+
+Configurable via `MODEL_NAME` (see "Config" below) — hishab also publishes a larger [`hishab/titu_stt_bn_conformer_large`](https://huggingface.co/hishab/titu_stt_bn_conformer_large) checkpoint on the same Conformer-CTC family, swappable via the same setting. `GET /api/v1/asr/info` reports which architecture is actually loaded (see "Endpoints" below).
+
+Inference notes:
+
+- Runs in half precision (`fp16`) on GPU (`ASREngine.load()`) — roughly doubles throughput with negligible accuracy impact for CTC models; not applied on CPU, which lacks an efficient fp16 kernel path for most ops.
+- Audio longer than `MAX_SEGMENT_SECONDS` (18s default) is split into consecutive, non-overlapping segments before transcription and rejoined afterward — this checkpoint was trained on clips up to ~18.5s, and longer inputs blow up the encoder's relative-attention memory otherwise.
 
 ## Architecture
 
@@ -81,7 +92,7 @@ pip install -e .
 cp .env.example .env
 ```
 
-Model license: **CC-BY-NC-4.0** (non-commercial). `nemo_toolkit[asr]` is a heavy install — several minutes, several GB. `pip install -e .` alone gets you the gateway's dependencies only (fastapi/httpx/uvicorn — no torch/nemo). To also run the model server locally, install the `serve` extra: `pip install -e ".[serve]"`.
+`nemo_toolkit[asr]` is a heavy install — several minutes, several GB. `pip install -e .` alone gets you the gateway's dependencies only (fastapi/httpx/uvicorn — no torch/nemo). To also run the model server locally, install the `serve` extra: `pip install -e ".[serve]"`.
 
 ## Docker
 
