@@ -15,7 +15,7 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
-RUN pip install --no-cache-dir ".[serve,denoise]"
+RUN pip install --no-cache-dir ".[serve,denoise,speaker]"
 
 COPY . .
 

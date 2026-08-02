@@ -2,20 +2,25 @@ import litserve as ls
 
 from src.core.config import settings
 from src.litserver.litapi import ASRLitAPI
+from src.litserver.speaker_router import router as speaker_router
 
 
 def create_litserve_server() -> ls.LitServer:
-    """Build the LitServe server that holds the model, bound to LITSERVE_HOST:LITSERVE_PORT.
+    """Build the LitServe server that holds the model.
 
-    Loopback-only by default — it's not the public entrypoint. The public
-    gateway (src.api gateway app) is a pure FastAPI app with no model in it;
-    it reaches this server over real HTTP, the same way any external client
-    would.
+    Not the public entrypoint — the gateway (src.api, pure FastAPI, no model
+    in it) reaches this server over real HTTP, the same way any external
+    client would. Also mounts the internal speaker-embedding route used by
+    the gateway's live-cc speaker gate (SPEAKER_GATE_ENABLED); it runs in this
+    main process rather than a GPU worker, since Resemblyzer's model is small.
+    No api_path override: LitServe's own default is already "/predict".
     """
-    return ls.LitServer(
-        ASRLitAPI(max_batch_size=1, api_path=settings.API_PATH),
+    server = ls.LitServer(
+        ASRLitAPI(max_batch_size=1),
         accelerator=settings.ACCELERATOR,
         devices=settings.DEVICES,
         workers_per_device=settings.WORKERS_PER_DEVICE,
         healthcheck_path="/health",
     )
+    server.app.include_router(speaker_router)
+    return server
