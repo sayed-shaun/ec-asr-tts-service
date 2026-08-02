@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration, overridable via ASR_*-prefixed env vars or .env.
+    """Runtime configuration, overridable via env vars or .env.
 
     Notes on non-obvious defaults:
     - DEVICES is pinned rather than "auto" because LitServe's "auto" device
@@ -31,47 +31,52 @@ class Settings(BaseSettings):
       work per chunk scales roughly as chunk_seconds / this value; set to 0 to
       disable interim captions. LIVE_CC_INPUT_SAMPLE_RATE must match the raw
       PCM rate the client actually streams, not SAMPLE_RATE.
-    - LITSERVE_HOST/LITSERVE_PORT is the address the gateway (HOST/API_PORT,
-      pure FastAPI, no model loaded in-process) uses to reach the separate
-      LitServe model server process/container (see run_litserve.py) over
-      real HTTP. LitServe itself always binds 0.0.0.0 on its own container —
-      this setting is only the gateway's *connect* target, e.g. "127.0.0.1"
-      for two local processes on one host, or the service name (e.g.
-      "litserver") when they're separate containers on a Docker network.
+    - GATEWAY_PORT is the only network setting left configurable: the
+      gateway (pure FastAPI, no model loaded in-process; always binds
+      0.0.0.0, not configurable — see main.py) is the one thing whose port
+      genuinely varies per deployment. LitServe's own port (fixed at 8000 —
+      see run_litserve.py) and where the gateway reaches it ("litserver:8000",
+      see src/api/client.py's LITSERVE_BASE_URL) are hardcoded, not
+      Settings fields: this assumes Docker Compose's network (the
+      "litserver" hostname resolves via Docker's internal DNS), so bare
+      two-terminal local dev without Compose needs a hosts-file entry
+      mapping "litserver" to 127.0.0.1, or an equivalent override, to keep
+      working. LitServe's inference route ("/predict") isn't a Settings
+      field either — it's LitServe's own built-in default, left unset in
+      litserver/server.py rather than duplicated as a constant; src/api/client.py
+      hardcodes the same literal for the gateway's outbound calls.
+    - SPEAKER_GATE_ENABLED defaults off: it's a real feature (segment-level
+      speaker verification for live-cc — enroll the first SPEAKER_ENROLL_SECONDS
+      of a call, then drop chunks that don't match that voice closely enough)
+      but SPEAKER_SIMILARITY_THRESHOLD=0.75 is a generic starting point from
+      speaker-verification literature, not measured against this project's own
+      calls. Tune it against real recordings before trusting it — too low lets
+      background talkers through, too high clips the enrolled speaker's own
+      quieter segments.
     """
 
-    model_config = SettingsConfigDict(env_prefix="ASR_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     MODEL_NAME: str = "hishab/titu_stt_bn_fastconformer"
-
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
-
     DEVICES: Union[int, Literal["auto"]] = 1
 
     WORKERS_PER_DEVICE: int = 2
-
     TRANSCRIBE_BATCH_SIZE: int = 4
-
     SAMPLE_RATE: int = 16000
-
     DENOISE: bool = False
-
     DENOISE_STATIONARY: bool = True
-
     MAX_SEGMENT_SECONDS: float = 18.0
 
-    HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
-    API_PATH: str = "/api/v1/asr/transcribe"
-
-    LITSERVE_HOST: str = "127.0.0.1"
-    LITSERVE_PORT: int = 8001
+    GATEWAY_PORT: int = 8000
 
     LIVE_CC_CHUNK_SECONDS: float = 3.0
-
     LIVE_CC_INTERIM_INTERVAL_SECONDS: float = 1.0
-
     LIVE_CC_INPUT_SAMPLE_RATE: int = 8000
+
+    SPEAKER_GATE_ENABLED: bool = False
+    SPEAKER_ENROLL_SECONDS: float = 3.0
+    SPEAKER_SIMILARITY_THRESHOLD: float = 0.75
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
