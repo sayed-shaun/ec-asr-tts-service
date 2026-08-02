@@ -47,7 +47,7 @@
 
 <section>
   <h2>Transcribe</h2>
-  <p>Uploads to <code>POST /v1/asr/transcribe/file</code> — same model path as <code>/predict</code>.</p>
+  <p>Uploads to <code>POST /api/v1/asr/transcribe/file</code> — same model path as <code>/predict</code>.</p>
   <input type="file" id="fileInput" accept="audio/*" />
   <button id="transcribeBtn">Transcribe file</button>
   <button id="recordBtn">🎤 Record voice</button>
@@ -58,7 +58,7 @@
 <section>
   <h2>Live captioning</h2>
   <p>
-    Streams mic audio to <code>WS /v1/live-cc/ws</code> as 16-bit PCM at
+    Streams mic audio to <code>WS /api/v1/live-cc/ws</code> as 16-bit PCM at
     <code>ASR_LIVE_CC_INPUT_SAMPLE_RATE</code>. An <em>interim</em> caption
     (shown dimmed) updates every <code>ASR_LIVE_CC_INTERIM_INTERVAL_SECONDS</code>;
     it's replaced by a committed final caption every
@@ -94,7 +94,7 @@ async function transcribeBlob(blob, filename) {
   try {
     const formData = new FormData();
     formData.append("file", blob, filename);
-    const resp = await fetch("/v1/asr/transcribe/file", { method: "POST", body: formData });
+    const resp = await fetch("/api/v1/asr/transcribe/file", { method: "POST", body: formData });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
 
@@ -199,7 +199,7 @@ async function startLiveCc() {
   mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
   const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(`${wsProtocol}//${location.host}/v1/live-cc/ws`);
+  socket = new WebSocket(`${wsProtocol}//${location.host}/api/v1/live-cc/ws`);
   socket.binaryType = "arraybuffer";
 
   socket.onopen = () => {

@@ -16,7 +16,7 @@ def create_gateway_app() -> FastAPI:
     No model is loaded in this process — it's a thin proxy in front of the
     LitServe model server (see run_litserve.py), reached over real HTTP at
     litserver:8000 (fixed, see src.core.config). /static serves the manual
-    test GUI for /predict and /v1/live-cc/ws (static/index.html).
+    test GUI for /predict and /api/v1/live-cc/ws (static/index.html).
     """
     app = FastAPI()
 

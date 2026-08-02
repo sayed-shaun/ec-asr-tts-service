@@ -10,7 +10,7 @@ from loguru import logger
 from src.api import client as litserve_client
 from src.core.config import settings
 
-router = APIRouter(prefix="/v1/live-cc", tags=["Live CC"])
+router = APIRouter(prefix="/api/v1/live-cc", tags=["Live CC"])
 
 _PCM_SAMPLE_WIDTH_BYTES = 2
 

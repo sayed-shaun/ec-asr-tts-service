@@ -291,7 +291,7 @@ def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
     )
     pcm = np.zeros(chunk_samples, dtype=np.int16).tobytes()
 
-    with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
+    with live_cc_client.websocket_connect("/api/v1/live-cc/ws") as ws:
         ws.send_bytes(pcm)
         message = ws.receive_json()
 
@@ -307,7 +307,7 @@ def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
     )
     half_pcm = np.zeros(chunk_samples // 2, dtype=np.int16).tobytes()
 
-    with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
+    with live_cc_client.websocket_connect("/api/v1/live-cc/ws") as ws:
         ws.send_bytes(half_pcm)
         interim = ws.receive_json()
         ws.send_bytes(half_pcm)
@@ -331,7 +331,7 @@ def test_live_cc_ws_emits_interim_captions_before_final(live_cc_client):
     interim_seconds = settings.LIVE_CC_INTERIM_INTERVAL_SECONDS
     num_interim_steps = int(chunk_seconds / interim_seconds) - 1
 
-    with live_cc_client.websocket_connect("/v1/live-cc/ws") as ws:
+    with live_cc_client.websocket_connect("/api/v1/live-cc/ws") as ws:
         messages = []
         for _ in range(num_interim_steps):
             ws.send_bytes(step_pcm)
@@ -417,7 +417,7 @@ def test_live_cc_ws_speaker_gate_drops_non_matching_chunk(speaker_gate_client):
     matching_pcm = np.full(input_sr, 100, dtype=np.int16).tobytes()
     different_pcm = np.full(input_sr, -100, dtype=np.int16).tobytes()
 
-    with client.websocket_connect("/v1/live-cc/ws") as ws:
+    with client.websocket_connect("/api/v1/live-cc/ws") as ws:
         ws.send_bytes(matching_pcm)  # enrolls on the positive-sample signal
 
         ws.send_bytes(different_pcm)
