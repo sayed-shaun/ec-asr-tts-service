@@ -1,6 +1,6 @@
 # Bangla ASR Pipeline
 
-Bengali speech-to-text service. Model: [hishab/titu_stt_bn_fastconformer](https://huggingface.co/hishab/titu_stt_bn_fastconformer) (NeMo FastConformer-CTC). Served with [LitServe](https://github.com/Lightning-AI/LitServe).
+Bengali speech-to-text service. Architecture: NeMo Conformer-CTC (default checkpoint: [hishab/titu_stt_bn_fastconformer](https://huggingface.co/hishab/titu_stt_bn_fastconformer), configurable via `MODEL_NAME` — see "Config" below). Served with [LitServe](https://github.com/Lightning-AI/LitServe).
 
 ## Architecture
 
@@ -115,7 +115,7 @@ pytest -q
 |---|---|
 | `POST /api/v1/asr/transcribe/file` | multipart file upload (gateway, public) |
 | `WS /api/v1/live-cc/ws` | streamed captions, raw 16-bit PCM (gateway, public) |
-| `GET /api/v1/asr/info` | model metadata (gateway, public) |
+| `GET /api/v1/asr/info` | model metadata: architecture, HF repo reference, language, sample rate (gateway, public) |
 | `GET /health` | LitServe healthcheck (internal) |
 | `GET /docs` | Swagger UI (gateway) — WebSocket routes never appear here, OpenAPI has no way to describe them |
 | `POST /predict` | raw JSON inference — **internal LitServe only**, not exposed on the gateway |

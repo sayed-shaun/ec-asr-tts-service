@@ -46,7 +46,11 @@ def info_client():
 def test_info_endpoint(info_client):
     resp = info_client.get("/api/v1/asr/info")
     assert resp.status_code == 200
-    assert resp.json()["model"] == "hishab/titu_stt_bn_fastconformer"
+    body = resp.json()
+    assert body["hf_repo"] == settings.MODEL_NAME
+    assert body["model"] == settings.MODEL_NAME.split("/")[-1].removeprefix(
+        "titu_stt_bn_"
+    )
 
 
 @pytest.fixture
