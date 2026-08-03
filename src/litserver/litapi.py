@@ -1,7 +1,7 @@
 import time
 
 import litserve as ls
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from loguru import logger
 
 from src.api.v1.asr.schema import AsrRequest, AsrResponse, Output
@@ -33,9 +33,7 @@ class ASRLitAPI(ls.LitAPI):
             warm_audio_decoder(settings.SAMPLE_RATE)
             logger.info("Audio decoder warmed up")
         except Exception as exc:
-            logger.warning(
-                f"Audio decoder warmup failed (continuing anyway): {exc}"
-            )
+            logger.warning(f"Audio decoder warmup failed (continuing anyway): {exc}")
 
     def decode_request(self, request: AsrRequest) -> dict:
         sample_rate = request.config.samplingRate or settings.SAMPLE_RATE
@@ -45,7 +43,9 @@ class ASRLitAPI(ls.LitAPI):
                 for item in request.audio
             ]
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
         return {
             "audios": audios,
             "sample_rate": sample_rate,
