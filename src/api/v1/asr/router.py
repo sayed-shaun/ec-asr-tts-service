@@ -31,26 +31,16 @@ async def forward_to_litserve(call: Awaitable[httpx.Response]) -> httpx.Response
 
 
 @router.get("/info")
-async def info() -> JSONResponse:
-    """Model metadata: name and parameter count (from LitServe's internal
-    /internal/model/info), plus language and sample rate (static gateway
-    config) — see README's Endpoints table.
+async def info() -> dict:
+    """Static metadata about the deployed model/endpoint. Safe to call
+    from the main process — unlike /predict, it does not touch the
+    model itself.
     """
-    async with litserve_client.get_litserve_client() as client:
-        resp = await forward_to_litserve(litserve_client.model_info(client))
-
-    if resp.status_code != status.HTTP_200_OK:
-        return JSONResponse(content=resp.json(), status_code=resp.status_code)
-
-    model_meta = resp.json()
-    return JSONResponse(
-        content={
-            "model_name": model_meta["model_name"],
-            "num_parameters_millions": round(model_meta["num_parameters"] / 1e6, 1),
-            "language": "bn",
-            "sample_rate": settings.SAMPLE_RATE,
-        }
-    )
+    return {
+        "model": settings.MODEL_NAME,
+        "language": "bn",
+        "sample_rate": settings.SAMPLE_RATE,
+    }
 
 
 @router.post("/transcribe")

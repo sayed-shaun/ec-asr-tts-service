@@ -31,7 +31,7 @@ class ASREngine:
         import nemo.collections.asr as nemo_asr
 
         logger.info(
-            f"Loading NeMo ASR model '{self.model_name}' on " f"device '{self.device}'"
+            f"Loading NeMo ASR model '{self.model_name}' on device '{self.device}'"
         )
         self.model = nemo_asr.models.ASRModel.from_pretrained(
             model_name=self.model_name
@@ -42,9 +42,6 @@ class ASREngine:
         self.model = self.model.to(self.device)
         self.model.eval()
         if self.device == "cuda":
-            # Half precision roughly doubles throughput on GPU with
-            # negligible accuracy impact for CTC models; not applied on CPU,
-            # where most ops don't have an efficient fp16 kernel path.
             self.model = self.model.half()
 
         if warmup_seconds > 0:
@@ -105,21 +102,6 @@ class ASREngine:
             return hypothesis
         text = getattr(hypothesis, "text", None)
         return text if text is not None else str(hypothesis)
-
-    @staticmethod
-    def count_parameters(model_name: str) -> int:
-        """Load a checkpoint on CPU just long enough to count trainable
-        parameters, then discard it.
-
-        Used by /internal/model/info, not a live serving worker: the model
-        loaded in ASRLitAPI.setup() lives in a GPU worker process that this
-        main LitServer process can't reach directly (see server.py, same
-        reason SpeakerEncoder runs its own model rather than reusing one).
-        """
-        import nemo.collections.asr as nemo_asr
-
-        model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
-        return model.num_weights
 
     @staticmethod
     def resolve_device(device: str) -> str:
