@@ -1,4 +1,4 @@
-# Bangla ASR Pipeline
+# ASR Inference Pipeline
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![FastAPI](https://img.shields.io/badge/gateway-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -6,7 +6,6 @@
 [![Docker](https://img.shields.io/badge/deploy-Docker%20Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 [![NeMo](https://img.shields.io/badge/model-NeMo%20FastConformer--CTC-76B900?logo=nvidia&logoColor=white)](https://github.com/NVIDIA/NeMo)
 [![Hugging Face](https://img.shields.io/badge/model%20from-Hugging%20Face-yellow)](#current-model)
-[![Model License: CC BY-NC 4.0](https://img.shields.io/badge/model%20license-CC--BY--NC--4.0-lightgrey)](#current-model)
 
 Bengali ASR (automatic speech recognition): a NeMo Conformer-CTC model served with [LitServe](https://github.com/Lightning-AI/LitServe), fronted by a FastAPI gateway.
 
