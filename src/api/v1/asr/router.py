@@ -1,12 +1,32 @@
 import base64
+from typing import Awaitable
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+import httpx
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 
 from src.api import client as litserve_client
 from src.api.v1.asr.schema import AsrRequest
 
-router = APIRouter(prefix="/api/v1/asr", tags=["asr"])
+router = APIRouter(prefix="/api/v1/asr", tags=["ASR"])
+
+
+async def forward_to_litserve(call: Awaitable[httpx.Response]) -> httpx.Response:
+    """Await a litserve_client call, turning connection failures into HTTP
+    errors a client can distinguish (502: litserver unreachable, 504: it
+    accepted the connection but didn't respond in time) instead of a bare 500.
+    """
+    try:
+        return await call
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="LitServe request timed out",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="LitServe is unreachable"
+        ) from exc
 
 
 @router.post("/transcribe")
@@ -18,8 +38,8 @@ async def transcribe(request: AsrRequest) -> JSONResponse:
     because Swagger UI can't render a base64 text box nicely.
     """
     async with litserve_client.get_litserve_client() as client:
-        resp = await litserve_client.transcribe_request(
-            client, request.model_dump()
+        resp = await forward_to_litserve(
+            litserve_client.transcribe_request(client, request.model_dump())
         )
 
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
@@ -37,10 +57,14 @@ async def transcribe_file(file: UploadFile = File(...)) -> JSONResponse:
     """
     audio_bytes = await file.read()
     if not audio_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty"
+        )
 
     audio_content_b64 = base64.b64encode(audio_bytes).decode("utf-8")
     async with litserve_client.get_litserve_client() as client:
-        resp = await litserve_client.transcribe(client, audio_content_b64)
+        resp = await forward_to_litserve(
+            litserve_client.transcribe(client, audio_content_b64)
+        )
 
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
