@@ -14,6 +14,7 @@ import httpx
 LITSERVE_BASE_URL = "http://litserver:8000"
 PREDICT_PATH = "/predict"
 SPEAKER_EMBED_PATH = "/internal/speaker/embed"
+MODEL_INFO_PATH = "/internal/model/info"
 
 
 def get_litserve_client() -> httpx.AsyncClient:
@@ -64,3 +65,8 @@ async def embed(
     )
     resp.raise_for_status()
     return resp.json()["embedding"]
+
+
+async def model_info(client: httpx.AsyncClient, timeout: float = 120) -> httpx.Response:
+    """GET LitServe's internal model-info route, return the raw response."""
+    return await client.get(MODEL_INFO_PATH, timeout=timeout)

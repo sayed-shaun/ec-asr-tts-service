@@ -20,18 +20,6 @@ def create_gateway_app() -> FastAPI:
     """
     app = FastAPI()
 
-    @app.get("/api/v1/asr/info")
-    async def info() -> dict:
-        """Static metadata about the deployed model/endpoint. Safe to call
-        from the main process — unlike /predict, it does not touch the
-        model itself.
-        """
-        return {
-            "model": settings.MODEL_NAME,
-            "language": "bn",
-            "sample_rate": settings.SAMPLE_RATE,
-        }
-
     app.include_router(asr_router)
     app.include_router(live_cc_router)
     app.mount("/static", StaticFiles(directory="static"), name="static")

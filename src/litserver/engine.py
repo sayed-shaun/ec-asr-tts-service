@@ -107,6 +107,21 @@ class ASREngine:
         return text if text is not None else str(hypothesis)
 
     @staticmethod
+    def count_parameters(model_name: str) -> int:
+        """Load a checkpoint on CPU just long enough to count trainable
+        parameters, then discard it.
+
+        Used by /internal/model/info, not a live serving worker: the model
+        loaded in ASRLitAPI.setup() lives in a GPU worker process that this
+        main LitServer process can't reach directly (see server.py, same
+        reason SpeakerEncoder runs its own model rather than reusing one).
+        """
+        import nemo.collections.asr as nemo_asr
+
+        model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+        return model.num_weights
+
+    @staticmethod
     def resolve_device(device: str) -> str:
         if device == "auto":
             return "cuda" if torch.cuda.is_available() else "cpu"

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from src.api import client as litserve_client
 from src.api.v1.asr.schema import AsrRequest
+from src.core.config import settings
 
 router = APIRouter(prefix="/api/v1/asr", tags=["ASR"])
 
@@ -27,6 +28,29 @@ async def forward_to_litserve(call: Awaitable[httpx.Response]) -> httpx.Response
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="LitServe is unreachable"
         ) from exc
+
+
+@router.get("/info")
+async def info() -> JSONResponse:
+    """Model metadata: name and parameter count (from LitServe's internal
+    /internal/model/info), plus language and sample rate (static gateway
+    config) — see README's Endpoints table.
+    """
+    async with litserve_client.get_litserve_client() as client:
+        resp = await forward_to_litserve(litserve_client.model_info(client))
+
+    if resp.status_code != status.HTTP_200_OK:
+        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+    model_meta = resp.json()
+    return JSONResponse(
+        content={
+            "model_name": model_meta["model_name"],
+            "num_parameters_millions": round(model_meta["num_parameters"] / 1e6, 1),
+            "language": "bn",
+            "sample_rate": settings.SAMPLE_RATE,
+        }
+    )
 
 
 @router.post("/transcribe")

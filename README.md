@@ -184,11 +184,12 @@ pytest -q
 | `POST /api/v1/asr/transcribe` | raw base64 JSON, forwarded straight to `/predict` (gateway, public) |
 | `POST /api/v1/asr/transcribe/file` | multipart file upload (gateway, public) |
 | `WS /api/v1/live-cc/ws` | streamed captions, raw 16-bit PCM (gateway, public) |
-| `GET /api/v1/asr/info` | model metadata: Hugging Face model name, language, sample rate (gateway, public) |
+| `GET /api/v1/asr/info` | model metadata: Hugging Face model name, parameter count (millions), language, sample rate (gateway, public) |
 | `GET /health` | LitServe healthcheck (internal) |
 | `GET /docs` | Swagger UI (gateway) — WebSocket routes never appear here |
 | `POST /predict` | raw JSON inference — **internal LitServe only** |
 | `POST /internal/speaker/embed` | speaker-embedding for the live-cc speaker gate — **internal LitServe only** |
+| `GET /internal/model/info` | model name + parameter count, backing `/api/v1/asr/info` — **internal LitServe only** |
 
 <details>
 <summary>Inference request / response payloads</summary>
