@@ -15,7 +15,7 @@ class ASREngine:
         max_segment_seconds: float = 18.0,
     ):
         self.model_name = model_name
-        self.device = self._resolve_device(device)
+        self.device = self.resolve_device(device)
         self.model = None
         self.max_segment_seconds = max_segment_seconds
 
@@ -31,8 +31,7 @@ class ASREngine:
         import nemo.collections.asr as nemo_asr
 
         logger.info(
-            f"Loading NeMo ASR model '{self.model_name}' on "
-            f"device '{self.device}'"
+            f"Loading NeMo ASR model '{self.model_name}' on " f"device '{self.device}'"
         )
         self.model = nemo_asr.models.ASRModel.from_pretrained(
             model_name=self.model_name
@@ -47,15 +46,11 @@ class ASREngine:
 
         if warmup_seconds > 0:
             try:
-                silence = np.zeros(
-                    int(sample_rate * warmup_seconds), dtype=np.float32
-                )
+                silence = np.zeros(int(sample_rate * warmup_seconds), dtype=np.float32)
                 self.transcribe([silence], batch_size=1, sample_rate=sample_rate)
                 logger.info("ASR model warmed up")
             except Exception as exc:
-                logger.warning(
-                    f"ASR model warmup failed (continuing anyway): {exc}"
-                )
+                logger.warning(f"ASR model warmup failed (continuing anyway): {exc}")
 
         logger.info("ASR model loaded")
 
@@ -66,15 +61,11 @@ class ASREngine:
         sample_rate: int = 16000,
     ) -> list[str]:
         if self.model is None:
-            raise RuntimeError(
-                "ASREngine.load() must be called before transcribe()"
-            )
+            raise RuntimeError("ASREngine.load() must be called before transcribe()")
 
         max_segment_samples = int(sample_rate * self.max_segment_seconds)
-        segments_per_audio = [self._split(a, max_segment_samples) for a in audios]
-        flat_segments = [
-            seg for segments in segments_per_audio for seg in segments
-        ]
+        segments_per_audio = [self.split(a, max_segment_samples) for a in audios]
+        flat_segments = [seg for segments in segments_per_audio for seg in segments]
 
         with torch.inference_mode():
             hypotheses = self.model.transcribe(
@@ -82,7 +73,7 @@ class ASREngine:
                 batch_size=max(1, min(batch_size, len(flat_segments))),
                 verbose=False,
             )
-        texts = [self._as_text(h) for h in hypotheses]
+        texts = [self.as_text(h) for h in hypotheses]
 
         results = []
         idx = 0
@@ -93,7 +84,7 @@ class ASREngine:
         return results
 
     @staticmethod
-    def _split(audio: np.ndarray, max_segment_samples: int) -> list[np.ndarray]:
+    def split(audio: np.ndarray, max_segment_samples: int) -> list[np.ndarray]:
         """Split audio longer than max_segment_samples into consecutive,
         non-overlapping chunks (hard cuts, no overlap — simplest option that
         avoids duplicated words at chunk boundaries in the joined transcript).
@@ -106,14 +97,14 @@ class ASREngine:
         ]
 
     @staticmethod
-    def _as_text(hypothesis) -> str:
+    def as_text(hypothesis) -> str:
         if isinstance(hypothesis, str):
             return hypothesis
         text = getattr(hypothesis, "text", None)
         return text if text is not None else str(hypothesis)
 
     @staticmethod
-    def _resolve_device(device: str) -> str:
+    def resolve_device(device: str) -> str:
         if device == "auto":
             return "cuda" if torch.cuda.is_available() else "cpu"
         return device
