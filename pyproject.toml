@@ -2,7 +2,7 @@
 name = "bangla-asr-pipeline"
 version = "0.1.0"
 description = "Bengali speech-to-text service"
-requires-python = ">=3.10"
+requires-python = "==3.12.*"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
@@ -55,8 +55,8 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [tool.ruff]
-line-length = 82
-target-version = "py310"
+line-length = 88
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
