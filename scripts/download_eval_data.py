@@ -56,9 +56,7 @@ def main() -> None:
     tar_path = out_dir / "data.tar"
     with tarfile.open(tar_path, "w") as tar:
         for split in SPLITS:
-            ds = load_dataset(
-                DATASET, CONFIG, split=split, trust_remote_code=True
-            )
+            ds = load_dataset(DATASET, CONFIG, split=split, trust_remote_code=True)
             ds = ds.cast_column("audio", Audio(decode=False))
 
             for count, row in enumerate(

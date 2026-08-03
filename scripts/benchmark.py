@@ -115,9 +115,7 @@ def build_payload(audio_bytes: bytes) -> dict:
     audio_bytes = ensure_pcm16_wav(audio_bytes)
     return {
         "config": {"language": {"sourceLanguage": "bn"}},
-        "audio": [
-            {"audioContent": base64.b64encode(audio_bytes).decode("utf-8")}
-        ],
+        "audio": [{"audioContent": base64.b64encode(audio_bytes).decode("utf-8")}],
     }
 
 
@@ -206,8 +204,7 @@ def format_report(
         " ACCURACY  (corpus-level, aggregated -- not an average",
         "           of per-file rates)",
         thin,
-        f" WER {words.wer:>6.4f}    MER {words.mer:>6.4f}    "
-        f"WIL {words.wil:>6.4f}",
+        f" WER {words.wer:>6.4f}    MER {words.mer:>6.4f}    " f"WIL {words.wil:>6.4f}",
         f" CER {chars.cer:>6.4f}",
         "",
         f" Word  sub {words.substitutions:<6} ins {words.insertions:<6} "
@@ -258,14 +255,10 @@ def load_ground_truth(data_dir: Path) -> dict:
     return json.loads(gt_path.read_text(encoding="utf-8"))
 
 
-async def run_benchmark(
-    args, ground_truth: dict, tar: tarfile.TarFile
-) -> list[dict]:
+async def run_benchmark(args, ground_truth: dict, tar: tarfile.TarFile) -> list[dict]:
     semaphore = asyncio.Semaphore(args.concurrency)
 
-    async def worker(
-        fname: str, gt: dict, client: httpx.AsyncClient
-    ) -> dict | None:
+    async def worker(fname: str, gt: dict, client: httpx.AsyncClient) -> dict | None:
         try:
             member = tar.getmember(fname)
         except KeyError:
@@ -275,9 +268,7 @@ async def run_benchmark(
         audio_bytes = tar.extractfile(member).read()
         payload = build_payload(audio_bytes)
         async with semaphore:
-            result = await call_endpoint(
-                client, args.api_url, payload, args.timeout
-            )
+            result = await call_endpoint(client, args.api_url, payload, args.timeout)
 
         return {
             "file": fname,
@@ -288,9 +279,7 @@ async def run_benchmark(
 
     async with httpx.AsyncClient() as client:
         tasks = [worker(fname, gt, client) for fname, gt in ground_truth.items()]
-        results = await tqdm_asyncio.gather(
-            *tasks, desc="Benchmarking", unit="file"
-        )
+        results = await tqdm_asyncio.gather(*tasks, desc="Benchmarking", unit="file")
 
     return [r for r in results if r is not None]
 
