@@ -27,6 +27,11 @@ evidently some legacy ASR services built on it — can't read at all ("unknown
 format: 3"). PCM16 is the universally-supported baseline and costs nothing
 for services that already handle float WAV fine.
 
+WER/CER strip punctuation before comparing (see normalize_for_wer): FLEURS
+references carry quotes and the Bengali daŗi (।) that no model transcribes,
+which otherwise inflates error rates with word-boundary artifacts rather than
+real transcription mistakes.
+
 Requires the `eval` extra: pip install ".[eval]" (jiwer, tqdm, soundfile;
 httpx is already a base dependency).
 
@@ -42,6 +47,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import statistics
 import sys
 import tarfile
@@ -55,6 +61,20 @@ import numpy as np
 import soundfile as sf
 from pydantic import BaseModel, ValidationError
 from tqdm.asyncio import tqdm as tqdm_asyncio
+
+PUNCTUATION_RE = re.compile(r"[\"“”‘’'।,.!?;:()\[\]{}—–\-]")
+
+
+def normalize_for_wer(text: str) -> str:
+    """Strip punctuation before WER/CER comparison.
+
+    FLEURS references carry quotes, the Bengali daŗi (।), and other
+    punctuation that models never transcribe. Left in, a quoted or
+    period-adjacent word reads as a different token from the model's
+    unpunctuated output — inflating WER/CER with word-boundary artifacts
+    that have nothing to do with transcription accuracy.
+    """
+    return re.sub(r"\s+", " ", PUNCTUATION_RE.sub(" ", text)).strip()
 
 
 class ResponseOutput(BaseModel):
@@ -342,20 +362,18 @@ def main() -> None:
         )
         sys.exit(1)
 
-    references = [r["reference"] for r in records]
+    references = [normalize_for_wer(r["reference"]) for r in records]
     hypotheses = [
-        r["transcript"] for r in records
+        normalize_for_wer(r["transcript"]) for r in records
     ]  # empty string for failed calls, counts as total miss
 
     words = jiwer.process_words(references, hypotheses)
     chars = jiwer.process_characters(references, hypotheses)
     for r in records:
-        r["wer"] = (
-            jiwer.wer(r["reference"], r["transcript"]) if r["reference"] else None
-        )
-        r["cer"] = (
-            jiwer.cer(r["reference"], r["transcript"]) if r["reference"] else None
-        )
+        ref_norm = normalize_for_wer(r["reference"])
+        hyp_norm = normalize_for_wer(r["transcript"])
+        r["wer"] = jiwer.wer(ref_norm, hyp_norm) if r["reference"] else None
+        r["cer"] = jiwer.cer(ref_norm, hyp_norm) if r["reference"] else None
 
     ok_latencies = sorted(r["wall_clock_seconds"] for r in records if r["ok"])
     n_failed = sum(1 for r in records if not r["ok"])
