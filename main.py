@@ -25,20 +25,9 @@ def create_gateway_app() -> FastAPI:
         """Static metadata about the deployed model/endpoint. Safe to call
         from the main process — unlike /predict, it does not touch the
         model itself.
-
-        "model" is the architecture (e.g. "fastconformer", "conformer_large"),
-        not the full HF repo id — different MODEL_NAME checkpoints are all
-        NeMo Conformer-CTC variants named "titu_stt_bn_<architecture>", and
-        the architecture is what callers actually care about. The full repo
-        id is still there under "hf_repo" for anyone who needs the exact
-        checkpoint reference.
         """
-        architecture = settings.MODEL_NAME.split("/")[-1].removeprefix(
-            "titu_stt_bn_"
-        )
         return {
-            "model": architecture,
-            "hf_repo": settings.MODEL_NAME,
+            "model": settings.MODEL_NAME,
             "language": "bn",
             "sample_rate": settings.SAMPLE_RATE,
         }
