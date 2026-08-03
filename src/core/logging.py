@@ -4,7 +4,7 @@ from loguru import logger
 
 from src.core.config import settings
 
-_configured = False
+configured = False
 
 
 def configure_logging() -> None:
@@ -12,8 +12,8 @@ def configure_logging() -> None:
 
     Safe to call multiple times (no-op after the first).
     """
-    global _configured
-    if _configured:
+    global configured
+    if configured:
         return
 
     logger.remove()
@@ -32,4 +32,4 @@ def configure_logging() -> None:
         enqueue=True,
     )
 
-    _configured = True
+    configured = True
