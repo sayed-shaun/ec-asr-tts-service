@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.9.1-cuda13.0-cudnn9-runtime
+FROM pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,10 +15,10 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
-RUN pip install --no-cache-dir ".[serve,denoise,speaker]"
+RUN pip install --no-cache-dir --break-system-packages ".[serve,denoise,speaker]"
 
 COPY . .
 
-EXPOSE 8001
+EXPOSE 8000
 
 CMD ["python", "run_litserve.py"]
