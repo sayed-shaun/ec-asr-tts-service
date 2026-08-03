@@ -36,6 +36,9 @@ class ASREngine:
         self.model = nemo_asr.models.ASRModel.from_pretrained(
             model_name=self.model_name
         )
+        decoding_cfg = self.model.cfg.decoding
+        decoding_cfg.strategy = "greedy_batch"
+        self.model.change_decoding_strategy(decoding_cfg)
         self.model = self.model.to(self.device)
         self.model.eval()
         if self.device == "cuda":
