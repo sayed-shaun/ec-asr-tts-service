@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    MODEL_NAME: str = "hishab/titu_stt_bn_fastconformer"
+    MODEL_NAME: str = "hishab/titu_stt_bn_conformer_large"
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     # Pinned rather than "auto": LitServe's "auto" shells out to `nvidia-smi -L`,
     # which can silently report 0 devices (NVML mismatch) even when

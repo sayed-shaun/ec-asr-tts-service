@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/gateway-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LitServe](https://img.shields.io/badge/model%20server-LitServe-792EE5)](https://github.com/Lightning-AI/LitServe)
 [![Docker](https://img.shields.io/badge/deploy-Docker%20Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![NeMo](https://img.shields.io/badge/model-NeMo%20FastConformer--CTC-76B900?logo=nvidia&logoColor=white)](https://github.com/NVIDIA/NeMo)
+[![NeMo](https://img.shields.io/badge/model-NeMo%20Conformer--CTC-76B900?logo=nvidia&logoColor=white)](https://github.com/NVIDIA/NeMo)
 [![Hugging Face](https://img.shields.io/badge/model%20from-Hugging%20Face-yellow)](#current-model)
 
 Bengali ASR (automatic speech recognition): a NeMo Conformer-CTC model served with [LitServe](https://github.com/Lightning-AI/LitServe), fronted by a FastAPI gateway.
@@ -29,11 +29,11 @@ Bengali ASR (automatic speech recognition): a NeMo Conformer-CTC model served wi
 
 ## Current Model
 
-- **Checkpoint:** [`titu_stt_bn_fastconformer`](https://huggingface.co/hishab/titu_stt_bn_fastconformer) — pulled from Hugging Face at load time, not hosted by this project
-- **Architecture:** [Conformer](https://arxiv.org/abs/2005.08100) (Gulati et al., 2020), FastConformer variant — CTC decoding, fine-tuned for Bengali (`bn`)
+- **Checkpoint:** [`titu_stt_bn_conformer_large`](https://huggingface.co/hishab/titu_stt_bn_conformer_large) — pulled from Hugging Face at load time, not hosted by this project
+- **Architecture:** [Conformer](https://arxiv.org/abs/2005.08100) (Gulati et al., 2020) — CTC decoding, fine-tuned for Bengali (`bn`)
 - **Input:** 16 kHz mono (`SAMPLE_RATE`)
 - **License:** CC-BY-NC-4.0 (non-commercial)
-- **Swap it:** set `MODEL_NAME` (see [Config](#config)) to the larger [`titu_stt_bn_conformer_large`](https://huggingface.co/hishab/titu_stt_bn_conformer_large) checkpoint, same family. `GET /api/v1/asr/info` reports whichever one is actually loaded.
+- **Swap it:** set `MODEL_NAME` (see [Config](#config)) to the smaller, faster [`titu_stt_bn_fastconformer`](https://huggingface.co/hishab/titu_stt_bn_fastconformer) checkpoint, same family — lower accuracy but higher throughput (see `outputs/benchmark_report.pdf`). `GET /api/v1/asr/info` reports whichever one is actually loaded.
 
 **Inference notes**
 
