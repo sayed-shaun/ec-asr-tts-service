@@ -1,8 +1,8 @@
 import litserve as ls
 
+from src.api.speaker.router import router as speaker_router
 from src.core.config import settings
 from src.litserver.litapi import ASRLitAPI
-from src.litserver.speaker_router import router as speaker_router
 
 
 def create_litserve_server() -> ls.LitServer:
