@@ -25,7 +25,7 @@ from src.litserver.litapi import ASRLitAPI
 from src.utils.audio import decode_base64_audio, denoise
 
 
-def _make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
+def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
     samples = (
         np.sin(2 * np.pi * 440 * np.arange(int(sr * seconds)) / sr) * 32767
     ).astype(np.int16)
@@ -47,10 +47,7 @@ def test_info_endpoint(info_client):
     resp = info_client.get("/api/v1/asr/info")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["hf_repo"] == settings.MODEL_NAME
-    assert body["model"] == settings.MODEL_NAME.split("/")[-1].removeprefix(
-        "titu_stt_bn_"
-    )
+    assert body["model"] == settings.MODEL_NAME
 
 
 @pytest.fixture
@@ -88,30 +85,28 @@ def asr_client(monkeypatch):
 def test_transcribe_json_endpoint(asr_client):
     resp = asr_client.post(
         "/api/v1/asr/transcribe",
-        json={"audio": [{"audioContent": _make_wav_base64()}]},
+        json={"audio": [{"audioContent": make_wav_base64()}]},
     )
     assert resp.status_code == 200
     assert resp.json()["output"][0]["source"] == "হ্যালো"
 
 
 def test_decode_base64_audio_roundtrip():
-    b64 = _make_wav_base64(seconds=1.0, sr=16000)
+    b64 = make_wav_base64(seconds=1.0, sr=16000)
     waveform = decode_base64_audio(b64, target_sr=16000)
     assert waveform.dtype == np.float32
     assert 15900 <= waveform.shape[0] <= 16100
 
 
 def test_decode_base64_audio_resamples():
-    b64 = _make_wav_base64(seconds=1.0, sr=8000)
+    b64 = make_wav_base64(seconds=1.0, sr=8000)
     waveform = decode_base64_audio(b64, target_sr=16000)
     assert 15900 <= waveform.shape[0] <= 16100
 
 
 def test_decode_base64_audio_rejects_garbage():
     with pytest.raises(ValueError):
-        decode_base64_audio(
-            base64.b64encode(b"not audio").decode(), target_sr=16000
-        )
+        decode_base64_audio(base64.b64encode(b"not audio").decode(), target_sr=16000)
 
 
 def test_decode_base64_audio_skips_denoise_by_default(monkeypatch):
@@ -120,27 +115,21 @@ def test_decode_base64_audio_skips_denoise_by_default(monkeypatch):
     undenoised text), so it must stay opt-in, not silently applied.
     """
     called = []
-    monkeypatch.setattr(
-        "src.utils.audio.denoise", lambda w, sr: called.append(1) or w
-    )
-    decode_base64_audio(_make_wav_base64(), target_sr=16000)
+    monkeypatch.setattr("src.utils.audio.denoise", lambda w, sr: called.append(1) or w)
+    decode_base64_audio(make_wav_base64(), target_sr=16000)
     assert not called
 
 
 def test_decode_base64_audio_denoises_when_enabled(monkeypatch):
     monkeypatch.setattr(settings, "DENOISE", True)
     called = []
-    monkeypatch.setattr(
-        "src.utils.audio.denoise", lambda w, sr: called.append(1) or w
-    )
-    decode_base64_audio(_make_wav_base64(), target_sr=16000)
+    monkeypatch.setattr("src.utils.audio.denoise", lambda w, sr: called.append(1) or w)
+    decode_base64_audio(make_wav_base64(), target_sr=16000)
     assert called
 
 
 def test_denoise_preserves_dtype_and_length():
-    waveform = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype(
-        np.float32
-    )
+    waveform = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype(np.float32)
     out = denoise(waveform, 16000)
     assert out.dtype == np.float32
     assert out.shape == waveform.shape
@@ -201,7 +190,7 @@ def lit_api():
 
 
 def test_lit_api_full_cycle(lit_api):
-    request = AsrRequest(audio=[{"audioContent": _make_wav_base64()}])
+    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
     decoded = lit_api.decode_request(request)
     assert len(decoded["audios"]) == 1
 
@@ -326,8 +315,7 @@ def test_live_cc_ws_emits_interim_captions_before_final(live_cc_client):
     final chunk boundary.
     """
     interim_samples = int(
-        settings.LIVE_CC_INPUT_SAMPLE_RATE
-        * settings.LIVE_CC_INTERIM_INTERVAL_SECONDS
+        settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_INTERIM_INTERVAL_SECONDS
     )
     step_pcm = np.zeros(interim_samples, dtype=np.int16).tobytes()
 
@@ -425,15 +413,11 @@ def test_live_cc_ws_speaker_gate_drops_non_matching_chunk(speaker_gate_client):
         ws.send_bytes(matching_pcm)  # enrolls on the positive-sample signal
 
         ws.send_bytes(different_pcm)
-        ws.send_bytes(
-            different_pcm
-        )  # completes a 3s chunk that should be dropped
+        ws.send_bytes(different_pcm)  # completes a 3s chunk that should be dropped
 
         ws.send_bytes(matching_pcm)
         ws.send_bytes(matching_pcm)
-        ws.send_bytes(
-            matching_pcm
-        )  # completes the next 3s chunk, should transcribe
+        ws.send_bytes(matching_pcm)  # completes the next 3s chunk, should transcribe
 
         message = ws.receive_json()
 
