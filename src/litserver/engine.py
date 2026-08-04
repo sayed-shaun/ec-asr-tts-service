@@ -2,6 +2,17 @@ import numpy as np
 import torch
 from loguru import logger
 
+# Greedy CTC decoding on non-speech audio emits a few spurious characters
+# rather than nothing ("তেন" for silence, "সগগগগগগ্গগ্গেন" for a music sting).
+# Measured over the 1322-clip FLEURS benchmark, real speech never drops below
+# 4.46 characters/second, while non-speech samples land between 0.07 and 2.80
+# — and non-speech output is also tiny in absolute terms (1-14 characters).
+# Requiring BOTH conditions is what makes this safe: a short but real phrase
+# in a mostly-quiet segment exceeds the character cap and survives, so only
+# "almost no output spread over a long stretch" is discarded.
+NON_SPEECH_MAX_CHARS = 15
+NON_SPEECH_MIN_CHAR_DENSITY = 3.0
+
 
 class ASREngine:
     """Thin wrapper around the NeMo FastConformer CTC checkpoint
@@ -14,12 +25,14 @@ class ASREngine:
         device: str = "auto",
         max_segment_seconds: float = 18.0,
         boundary_search_seconds: float = 2.0,
+        drop_non_speech: bool = True,
     ):
         self.model_name = model_name
         self.device = self.resolve_device(device)
         self.model = None
         self.max_segment_seconds = max_segment_seconds
         self.boundary_search_seconds = boundary_search_seconds
+        self.drop_non_speech = drop_non_speech
 
     def load(self, warmup_seconds: float = 1.0, sample_rate: int = 16000) -> None:
         """Load the checkpoint and run a warmup inference.
@@ -80,14 +93,39 @@ class ASREngine:
                 verbose=False,
             )
         texts = [self.as_text(h) for h in hypotheses]
+        if self.drop_non_speech:
+            texts = [
+                ""
+                if self.is_non_speech(text, len(segment) / sample_rate)
+                else text
+                for text, segment in zip(texts, flat_segments)
+            ]
 
         results = []
         idx = 0
         for segments in segments_per_audio:
             n = len(segments)
-            results.append(" ".join(texts[idx : idx + n]).strip())
+            # Filter empties so a dropped segment doesn't leave double spaces.
+            kept = [t for t in texts[idx : idx + n] if t]
+            results.append(" ".join(kept).strip())
             idx += n
         return results
+
+    @staticmethod
+    def is_non_speech(text: str, duration_seconds: float) -> bool:
+        """True when `text` looks like a hallucination on non-speech audio.
+
+        Silence, noise and music all decode to a handful of stray characters
+        instead of nothing. Both thresholds must trip: the output has to be
+        tiny *and* sparse relative to the audio it came from. See the module
+        constants for the measured separation.
+        """
+        chars = len("".join(text.split()))
+        if chars == 0:
+            return False
+        if chars > NON_SPEECH_MAX_CHARS or duration_seconds <= 0:
+            return False
+        return chars / duration_seconds < NON_SPEECH_MIN_CHAR_DENSITY
 
     @staticmethod
     def split(

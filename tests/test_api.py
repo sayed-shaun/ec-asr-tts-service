@@ -145,6 +145,73 @@ def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
     assert after == before
 
 
+def test_is_non_speech_flags_sparse_hallucinations():
+    """Outputs actually observed from silence, noise, tone and music."""
+    assert ASREngine.is_non_speech("তেন", 5.0)
+    assert ASREngine.is_non_speech("ত", 3.0)
+    assert ASREngine.is_non_speech("সগগগগগগ্গগ্গেন", 5.0)
+    assert ASREngine.is_non_speech("স", 15.0)
+
+
+def test_is_non_speech_keeps_real_speech():
+    """Real FLEURS speech never fell below 4.46 chars/sec over 1322 clips."""
+    sentence = "জার্মানির অনেক বেক করা খাবারগুলিতে বাদাম পাওয়া যায়"
+    assert not ASREngine.is_non_speech(sentence, 8.0)
+    # A short utterance in a short segment is dense enough to keep.
+    assert not ASREngine.is_non_speech("হ্যালো", 1.0)
+
+
+def test_is_non_speech_absolute_cap_protects_short_real_phrases():
+    """A brief real phrase in a long quiet segment is sparse, but exceeding the
+    character cap keeps it — only tiny *and* sparse output is discarded.
+    """
+    phrase = "আমি তোমাকে বলেছি ভাই"  # > NON_SPEECH_MAX_CHARS
+    assert len("".join(phrase.split())) > 15
+    assert not ASREngine.is_non_speech(phrase, 18.0)
+
+
+def test_is_non_speech_ignores_empty_and_bad_duration():
+    assert not ASREngine.is_non_speech("", 5.0)
+    assert not ASREngine.is_non_speech("   ", 5.0)
+    assert not ASREngine.is_non_speech("তেন", 0.0)
+
+
+def test_transcribe_drops_non_speech_segment_but_keeps_speech():
+    """The reported symptom: a music/silence tail became its own segment and
+    appended a stray character to an otherwise-correct transcript.
+    """
+    sr = 16000
+    engine = ASREngine(model_name="dummy", device="cpu", max_segment_seconds=18.0)
+    engine.model = MagicMock()
+    engine.model.transcribe.return_value = [
+        "আমি ভাত খেয়ে বাড়িতে চলে গিয়েছিলাম আজকে সকালে",
+        "ত",
+    ]
+
+    audio = np.zeros(int(sr * 30), dtype=np.float32)
+    result = engine.transcribe([audio], batch_size=2, sample_rate=sr)
+
+    assert result == ["আমি ভাত খেয়ে বাড়িতে চলে গিয়েছিলাম আজকে সকালে"]
+    assert not result[0].endswith("ত ")
+
+
+def test_transcribe_non_speech_drop_can_be_disabled():
+    sr = 16000
+    engine = ASREngine(
+        model_name="dummy",
+        device="cpu",
+        max_segment_seconds=18.0,
+        drop_non_speech=False,
+    )
+    engine.model = MagicMock()
+    engine.model.transcribe.return_value = ["আজকে আমি বাড়িতে গিয়েছিলাম", "ত"]
+
+    audio = np.zeros(int(sr * 30), dtype=np.float32)
+    result = engine.transcribe([audio], batch_size=2, sample_rate=sr)
+
+    assert result[0].endswith("ত")
+
+
 def test_itn_converts_compound_hundreds_and_decimals():
     assert itn("আটশো দুই দশমিক এগারো এন") == "802.11 এন"
     assert itn("দুই দশমিক চার গিগাহার্জ") == "2.4 গিগাহার্জ"
@@ -241,7 +308,14 @@ def test_lit_api_full_cycle(lit_api):
 
 
 def test_asr_engine_splits_long_audio_into_segments():
-    engine = ASREngine(model_name="dummy", device="cpu", max_segment_seconds=1.0)
+    # drop_non_speech off: the one-character stub transcripts below are far too
+    # sparse to pass the non-speech gate, and this test is about splitting.
+    engine = ASREngine(
+        model_name="dummy",
+        device="cpu",
+        max_segment_seconds=1.0,
+        drop_non_speech=False,
+    )
     engine.model = MagicMock()
     engine.model.transcribe.return_value = ["a", "b", "c"]
 
@@ -254,7 +328,13 @@ def test_asr_engine_splits_long_audio_into_segments():
 
 
 def test_asr_engine_leaves_short_audio_unsplit():
-    engine = ASREngine(model_name="dummy", device="cpu", max_segment_seconds=18.0)
+    # See above: stub transcript is too short for the non-speech gate.
+    engine = ASREngine(
+        model_name="dummy",
+        device="cpu",
+        max_segment_seconds=18.0,
+        drop_non_speech=False,
+    )
     engine.model = MagicMock()
     engine.model.transcribe.return_value = ["hello"]
 
