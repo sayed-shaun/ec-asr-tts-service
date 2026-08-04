@@ -69,7 +69,6 @@ flowchart LR
         Predict["POST /predict"]
         LitAPI["ASRLitAPI: decode_request -> predict -> encode_response"]
         Engine["ASREngine (NeMo model, GPU)"]
-        SpeakerEmbed["POST /internal/speaker/embed"]
         Health["GET /health"]
     end
 
@@ -82,7 +81,6 @@ flowchart LR
     Transcribe -->|real HTTP, httpx.AsyncClient| Predict
     File -->|real HTTP, httpx.AsyncClient| Predict
     WS -->|real HTTP per chunk, httpx.AsyncClient| Predict
-    WS -.->|if SPEAKER_GATE_ENABLED, httpx.AsyncClient| SpeakerEmbed
     Predict --> LitAPI --> Engine
 ```
 
@@ -110,15 +108,11 @@ flowchart LR
 │   ├── litserver/
 │   │   ├── engine.py              # NeMo model load + transcribe
 │   │   ├── litapi.py              # LitServe API: setup/decode/predict/encode
-│   │   ├── speaker.py             # Resemblyzer voice-embedding wrapper
 │   │   └── server.py              # builds the LitServer instance
 │   ├── utils/
-│   │   ├── audio.py               # base64 -> waveform decode/resample
-│   │   └── metrics.py             # cosine_similarity (speaker-gate comparisons)
+│   │   └── audio.py               # base64 -> waveform decode/resample
 │   └── api/
 │       ├── client.py              # gateway -> LitServe HTTP client (shared by asr/live_cc routers)
-│       ├── speaker/router.py      # internal /internal/speaker/embed route (mounted on LitServe)
-│       ├── speaker/schema.py      # request model
 │       └── v1/
 │           ├── asr/router.py      # /api/v1/asr/* routes (gateway; proxies to LitServe over HTTP)
 │           ├── asr/schema.py      # request/response models
@@ -188,7 +182,6 @@ pytest -q
 | `GET /health` | LitServe healthcheck (internal) |
 | `GET /docs` | Swagger UI (gateway) — WebSocket routes never appear here |
 | `POST /predict` | raw JSON inference — **internal LitServe only** |
-| `POST /internal/speaker/embed` | speaker-embedding for the live-cc speaker gate — **internal LitServe only** |
 
 <details>
 <summary>Inference request / response payloads</summary>
@@ -226,20 +219,6 @@ live-cc WebSocket messages:
 
 </details>
 
-<details>
-<summary>Speaker gate (optional, off by default)</summary>
-
-For live-cc calls where background talkers near the caller's mic shouldn't be transcribed (single mic, no hardware control — e.g. a voice call bot). When `SPEAKER_GATE_ENABLED=true`:
-
-1. The first `SPEAKER_ENROLL_SECONDS` of the call enroll a reference voice embedding (via LitServe's internal `/internal/speaker/embed`, backed by [Resemblyzer](https://github.com/resemble-ai/Resemblyzer)) — assumes the target caller speaks first; a background voice speaking first enrolls the wrong speaker.
-2. Every chunk after that is embedded and compared to the enrollment; chunks below `SPEAKER_SIMILARITY_THRESHOLD` cosine similarity are dropped — no caption emitted at all for that chunk.
-
-This is **segment-level gating only** — it can't separate two people talking *simultaneously* within one chunk (that needs real source separation). `SPEAKER_SIMILARITY_THRESHOLD=0.75` is a generic starting point from speaker-verification literature, not measured against this project's own calls — tune it against real recordings before trusting it in production.
-
-Requires the `speaker` extra: `pip install ".[serve,speaker]"` (already included in `litserver.Dockerfile`).
-
-</details>
-
 ---
 
 ## Config
@@ -248,7 +227,6 @@ All settings are plain env vars (no prefix). See `.env.example` for the full lis
 
 - `DEVICES` / `WORKERS_PER_DEVICE` — GPU worker process count, the actual concurrency lever for inference throughput (see `src/core/config.py` for memory-tradeoff notes).
 - `GATEWAY_PORT` — public gateway port (always binds `0.0.0.0`); the only network setting that's actually configurable. Gateway always reaches LitServe at fixed `litserver:8000`.
-- `SPEAKER_GATE_ENABLED` / `SPEAKER_ENROLL_SECONDS` / `SPEAKER_SIMILARITY_THRESHOLD` — optional live-cc speaker gate, see "Speaker gate" under [Endpoints](#endpoints) above.
 
 ---
 

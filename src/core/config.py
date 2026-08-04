@@ -23,10 +23,6 @@ class Settings(BaseSettings):
     LIVE_CC_INTERIM_INTERVAL_SECONDS: float = 1.0
     LIVE_CC_INPUT_SAMPLE_RATE: int = 8000
 
-    SPEAKER_GATE_ENABLED: bool = False
-    SPEAKER_ENROLL_SECONDS: float = 3.0
-    SPEAKER_SIMILARITY_THRESHOLD: float = 0.75
-
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
 

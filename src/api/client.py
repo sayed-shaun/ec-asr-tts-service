@@ -1,19 +1,18 @@
 """Communication layer between the FastAPI gateway and the LitServe service.
 
-Centralizes the base URL and the two internal HTTP calls the gateway makes
-into LitServe (transcribe, speaker-embed) so both asr/router.py and
-live_cc/router.py share one place instead of each building its own
-litserve_base_url/httpx.AsyncClient. Callers still own the client's
-lifetime (`async with get_litserve_client() as client: ...`) so a
-long-lived connection (e.g. a live-cc websocket) can reuse one client
-across many calls, same as before this existed.
+Centralizes the base URL and the /predict call the gateway makes into
+LitServe so both asr/router.py and live_cc/router.py share one place
+instead of each building its own litserve_base_url/httpx.AsyncClient.
+Callers still own the client's lifetime
+(`async with get_litserve_client() as client: ...`) so a long-lived
+connection (e.g. a live-cc websocket) can reuse one client across many
+calls, same as before this existed.
 """
 
 import httpx
 
 LITSERVE_BASE_URL = "http://litserver:8000"
 PREDICT_PATH = "/predict"
-SPEAKER_EMBED_PATH = "/internal/speaker/embed"
 
 
 def get_litserve_client() -> httpx.AsyncClient:
@@ -51,16 +50,3 @@ async def transcribe_request(
     transcribe() above for that narrower case.
     """
     return await client.post(PREDICT_PATH, json=payload, timeout=timeout)
-
-
-async def embed(
-    client: httpx.AsyncClient, audio_content_b64: str, timeout: float = 120
-) -> list[float]:
-    """POST base64 audio to LitServe's internal speaker-embedding route."""
-    resp = await client.post(
-        SPEAKER_EMBED_PATH,
-        json={"audio_content": audio_content_b64},
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return resp.json()["embedding"]

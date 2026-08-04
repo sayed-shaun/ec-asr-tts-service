@@ -31,9 +31,6 @@ dev = [
 triton = [
     "onnx>=1.15.0",
 ]
-speaker = [
-    "resemblyzer>=0.1.4",
-]
 eval = [
     "datasets>=2.19.0",
     "jiwer>=3.0.0",
