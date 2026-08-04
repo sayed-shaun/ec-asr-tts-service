@@ -23,6 +23,7 @@ from src.core.config import settings
 from src.litserver.engine import ASREngine
 from src.litserver.litapi import ASRLitAPI
 from src.utils.audio import decode_base64_audio
+from src.utils.itn import bengali_numerals_to_digits as itn
 
 
 def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
@@ -142,6 +143,68 @@ def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
     assert waveform.dtype == np.float32
     assert waveform.size > 0
     assert after == before
+
+
+def test_itn_converts_compound_hundreds_and_decimals():
+    assert itn("আটশো দুই দশমিক এগারো এন") == "802.11 এন"
+    assert itn("দুই দশমিক চার গিগাহার্জ") == "2.4 গিগাহার্জ"
+
+
+def test_itn_converts_thousands_and_separated_hundreds():
+    assert itn("এক হাজার নয় শো ঊননব্বই সালে") == "1989 সালে"
+    assert itn("এক শো আশি ডিগ্রি") == "180 ডিগ্রি"
+    assert itn("দুই লাখ") == "200000"
+    assert itn("তিন কোটি") == "30000000"
+
+
+def test_itn_leaves_small_bare_numerals_spelled_out():
+    """Small numbers in running prose are normally written as words, so
+    converting them costs more than it gains (measured on FLEURS).
+    """
+    assert itn("এক ব্যক্তি হাঁটছিলেন") == "এক ব্যক্তি হাঁটছিলেন"
+    assert itn("দুই") == "দুই"
+    # ...but a scale word means it reads as a real quantity.
+    assert itn("দুই হাজার") == "2000"
+
+
+def test_itn_leaves_non_numeric_text_byte_identical():
+    for text in ("কোন সংখ্যা নেই এখানে", "", "   ", "ইরানে বড় ধরনের হামলা"):
+        assert itn(text) == text
+
+
+def test_itn_unknown_tokens_pass_through_unchanged():
+    """The allowlist design means an unrecognised word must end the run and
+    survive verbatim — a missed conversion, never corrupted text.
+    """
+    assert itn("ফুটবল খেলা") == "ফুটবল খেলা"
+    assert itn("দশ ফুটবল বিশ") == "10 ফুটবল 20"
+
+
+def test_itn_preserves_surrounding_whitespace():
+    assert itn("  দশ  টাকা  ") == "  10  টাকা  "
+
+
+def test_itn_min_value_gate_is_tunable():
+    assert itn("দুই", min_value=0) == "2"
+    assert itn("দুই", min_value=10) == "দুই"
+
+
+def test_lit_api_applies_itn_to_response(lit_api, monkeypatch):
+    monkeypatch.setattr(settings, "ITN_ENABLED", True)
+    lit_api.engine.transcribe.return_value = ["এক শো আশি ডিগ্রি"]
+    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
+    prediction = lit_api.predict(lit_api.decode_request(request))
+    assert lit_api.encode_response(prediction).output[0].source == "180 ডিগ্রি"
+
+
+def test_lit_api_itn_can_be_disabled(lit_api, monkeypatch):
+    monkeypatch.setattr(settings, "ITN_ENABLED", False)
+    lit_api.engine.transcribe.return_value = ["এক শো আশি ডিগ্রি"]
+    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
+    prediction = lit_api.predict(lit_api.decode_request(request))
+    assert (
+        lit_api.encode_response(prediction).output[0].source == "এক শো আশি ডিগ্রি"
+    )
 
 
 def test_asr_request_rejects_empty_audio_list():

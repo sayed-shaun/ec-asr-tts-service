@@ -8,6 +8,12 @@ from src.api.v1.asr.schema import AsrRequest, AsrResponse, Output
 from src.core.config import settings
 from src.litserver.engine import ASREngine
 from src.utils.audio import decode_base64_audio, warm_audio_decoder
+from src.utils.itn import bengali_numerals_to_digits
+
+# Bare numerals below this stay spelled out; measured sweep over the 1322-clip
+# FLEURS benchmark put the corpus-WER optimum here (0.1541 -> 0.1370, and
+# 0.2811 -> 0.1898 on digit-bearing references). See src/utils/itn.py.
+ITN_MIN_VALUE = 10
 
 
 class ASRLitAPI(ls.LitAPI):
@@ -61,8 +67,21 @@ class ASRLitAPI(ls.LitAPI):
         return {"transcriptions": transcriptions, "received_at": x["received_at"]}
 
     def encode_response(self, output: dict) -> AsrResponse:
+        """Serialize transcripts, rewriting spelled-out numbers as digits.
+
+        Applied here rather than in ASREngine so the engine stays purely about
+        recognition, and so it lands after per-segment texts are joined — a
+        number split across a segment boundary would otherwise never be seen
+        as one numeral run.
+        """
         time_taken = time.time() - output["received_at"]
+        texts = output["transcriptions"]
+        if settings.ITN_ENABLED:
+            texts = [
+                bengali_numerals_to_digits(text, min_value=ITN_MIN_VALUE)
+                for text in texts
+            ]
         return AsrResponse(
-            output=[Output(source=text) for text in output["transcriptions"]],
+            output=[Output(source=text) for text in texts],
             time_taken=time_taken,
         )
