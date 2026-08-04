@@ -22,7 +22,7 @@ from src.api.v1.live_cc.router import router as live_cc_router
 from src.core.config import settings
 from src.litserver.engine import ASREngine
 from src.litserver.litapi import ASRLitAPI
-from src.utils.audio import decode_base64_audio, denoise
+from src.utils.audio import decode_base64_audio
 
 
 def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
@@ -107,32 +107,6 @@ def test_decode_base64_audio_resamples():
 def test_decode_base64_audio_rejects_garbage():
     with pytest.raises(ValueError):
         decode_base64_audio(base64.b64encode(b"not audio").decode(), target_sr=16000)
-
-
-def test_decode_base64_audio_skips_denoise_by_default(monkeypatch):
-    """DENOISE defaults to False — measured to rewrite the transcript on
-    every file tested (word count rose on all of them, none matched the
-    undenoised text), so it must stay opt-in, not silently applied.
-    """
-    called = []
-    monkeypatch.setattr("src.utils.audio.denoise", lambda w, sr: called.append(1) or w)
-    decode_base64_audio(make_wav_base64(), target_sr=16000)
-    assert not called
-
-
-def test_decode_base64_audio_denoises_when_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "DENOISE", True)
-    called = []
-    monkeypatch.setattr("src.utils.audio.denoise", lambda w, sr: called.append(1) or w)
-    decode_base64_audio(make_wav_base64(), target_sr=16000)
-    assert called
-
-
-def test_denoise_preserves_dtype_and_length():
-    waveform = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype(np.float32)
-    out = denoise(waveform, 16000)
-    assert out.dtype == np.float32
-    assert out.shape == waveform.shape
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
@@ -422,3 +396,4 @@ def test_live_cc_ws_speaker_gate_drops_non_matching_chunk(speaker_gate_client):
         message = ws.receive_json()
 
     assert message == {"text": "chunk-1", "is_final": True}
+

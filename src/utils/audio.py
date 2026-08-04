@@ -7,8 +7,6 @@ import wave
 import librosa
 import numpy as np
 
-from src.core.config import settings
-
 
 def decode_base64_audio(audio_content: str, target_sr: int) -> np.ndarray:
     """Decode a base64-encoded audio blob (wav/flac/ogg/mp3/webm/...) into a
@@ -43,22 +41,7 @@ def decode_base64_audio(audio_content: str, target_sr: int) -> np.ndarray:
     if waveform.size == 0:
         raise ValueError("Decoded waveform is empty")
 
-    waveform = waveform.astype(np.float32)
-    if settings.DENOISE:
-        waveform = denoise(waveform, target_sr)
-    return waveform
-
-
-def denoise(waveform: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Spectral-gating noise reduction (see DENOISE in config.py for the
-    measured tradeoffs before enabling this).
-    """
-    import noisereduce as nr
-
-    reduced = nr.reduce_noise(
-        y=waveform, sr=sample_rate, stationary=settings.DENOISE_STATIONARY
-    )
-    return reduced.astype(np.float32)
+    return waveform.astype(np.float32)
 
 
 def warm_audio_decoder(target_sr: int) -> None:

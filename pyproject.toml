@@ -31,9 +31,6 @@ dev = [
 triton = [
     "onnx>=1.15.0",
 ]
-denoise = [
-    "noisereduce>=3.0.0",
-]
 speaker = [
     "resemblyzer>=0.1.4",
 ]

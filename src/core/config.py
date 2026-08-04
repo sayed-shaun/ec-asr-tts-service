@@ -15,8 +15,6 @@ class Settings(BaseSettings):
     WORKERS_PER_DEVICE: int = 2
     TRANSCRIBE_BATCH_SIZE: int = 4
     SAMPLE_RATE: int = 16000
-    DENOISE: bool = False
-    DENOISE_STATIONARY: bool = True
     MAX_SEGMENT_SECONDS: float = 18.0
 
     GATEWAY_PORT: int = 8000

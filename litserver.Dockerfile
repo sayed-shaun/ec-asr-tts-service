@@ -15,7 +15,7 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY src/ src/
-RUN pip install --no-cache-dir --break-system-packages ".[serve,denoise,speaker]"
+RUN pip install --no-cache-dir --break-system-packages ".[serve,speaker]"
 
 COPY . .
 
