@@ -13,11 +13,13 @@ class ASREngine:
         model_name: str,
         device: str = "auto",
         max_segment_seconds: float = 18.0,
+        boundary_search_seconds: float = 2.0,
     ):
         self.model_name = model_name
         self.device = self.resolve_device(device)
         self.model = None
         self.max_segment_seconds = max_segment_seconds
+        self.boundary_search_seconds = boundary_search_seconds
 
     def load(self, warmup_seconds: float = 1.0, sample_rate: int = 16000) -> None:
         """Load the checkpoint and run a warmup inference.
@@ -64,7 +66,11 @@ class ASREngine:
             raise RuntimeError("ASREngine.load() must be called before transcribe()")
 
         max_segment_samples = int(sample_rate * self.max_segment_seconds)
-        segments_per_audio = [self.split(a, max_segment_samples) for a in audios]
+        boundary_search_samples = int(sample_rate * self.boundary_search_seconds)
+        segments_per_audio = [
+            self.split(a, max_segment_samples, boundary_search_samples)
+            for a in audios
+        ]
         flat_segments = [seg for segments in segments_per_audio for seg in segments]
 
         with torch.inference_mode():
@@ -84,17 +90,70 @@ class ASREngine:
         return results
 
     @staticmethod
-    def split(audio: np.ndarray, max_segment_samples: int) -> list[np.ndarray]:
+    def split(
+        audio: np.ndarray,
+        max_segment_samples: int,
+        boundary_search_samples: int = 0,
+    ) -> list[np.ndarray]:
         """Split audio longer than max_segment_samples into consecutive,
-        non-overlapping chunks (hard cuts, no overlap — simplest option that
-        avoids duplicated words at chunk boundaries in the joined transcript).
+        non-overlapping chunks.
+
+        Cuts are still non-overlapping (no overlap means no duplicated words in
+        the joined transcript), but instead of slicing at exactly
+        max_segment_samples, each boundary is pulled back to the quietest point
+        within the preceding boundary_search_samples. A hard cut landing
+        mid-word truncates it in both neighbouring segments, and CTC decoding
+        of a clipped word tends to drop it entirely rather than emit half —
+        losing real content silently. Cutting in a pause avoids that.
+
+        boundary_search_samples=0 restores plain fixed-size cuts.
         """
         if len(audio) <= max_segment_samples:
             return [audio]
-        return [
-            audio[start : start + max_segment_samples]
-            for start in range(0, len(audio), max_segment_samples)
-        ]
+
+        # Must stay under a full segment so every cut still advances.
+        search = min(boundary_search_samples, max_segment_samples // 2)
+
+        segments = []
+        start = 0
+        while start < len(audio):
+            end = start + max_segment_samples
+            if end >= len(audio):
+                segments.append(audio[start:])
+                break
+            cut = (
+                ASREngine.quietest_point(audio, end - search, end)
+                if search > 0
+                else end
+            )
+            segments.append(audio[start:cut])
+            start = cut
+        return segments
+
+    @staticmethod
+    def quietest_point(
+        audio: np.ndarray, lo: int, hi: int, frame_samples: int = 160
+    ) -> int:
+        """Return the sample index of the lowest-energy frame in audio[lo:hi].
+
+        Frames are 10ms at 16kHz — fine enough to land inside a short
+        inter-word pause, coarse enough that a single quiet sample inside a
+        voiced region can't win.
+
+        Ties resolve to the *latest* quietest frame, which keeps segments as
+        long as possible: on flat-energy audio (digital silence, a constant
+        tone) every frame ties, so the cut stays at the far end of the search
+        window instead of always jumping to its start.
+        """
+        lo = max(0, lo)
+        window = audio[lo:hi]
+        n_frames = window.size // frame_samples
+        if n_frames < 2:
+            return hi
+        frames = window[: n_frames * frame_samples].reshape(n_frames, frame_samples)
+        energy = np.abs(frames).mean(axis=1)
+        latest_min = n_frames - 1 - int(np.argmin(energy[::-1]))
+        return lo + latest_min * frame_samples + frame_samples // 2
 
     @staticmethod
     def as_text(hypothesis) -> str:

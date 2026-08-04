@@ -204,17 +204,83 @@ def test_asr_engine_leaves_short_audio_unsplit():
 
 
 def test_asr_engine_respects_custom_sample_rate_for_segment_length():
+    """max_segment_seconds is interpreted against the request's sample rate,
+    not a hardcoded 16kHz. Exact boundaries depend on where split() finds a
+    quiet point, so this asserts the length ceiling rather than a fixed count.
+    """
     engine = ASREngine(model_name="dummy", device="cpu", max_segment_seconds=1.0)
     engine.model = MagicMock()
-    engine.model.transcribe.return_value = ["a", "b"]
+    engine.model.transcribe.side_effect = lambda audio, **kw: [
+        f"s{i}" for i in range(len(audio))
+    ]
 
     audio = np.zeros(8000 * 2, dtype=np.float32)
-    result = engine.transcribe([audio], batch_size=4, sample_rate=8000)
+    engine.transcribe([audio], batch_size=4, sample_rate=8000)
 
-    assert result == ["a b"]
     segments = engine.model.transcribe.call_args.kwargs["audio"]
-    assert len(segments) == 2
+    assert len(segments) > 1
     assert all(len(seg) <= 8000 for seg in segments)
+    assert sum(len(seg) for seg in segments) == audio.size
+
+
+def test_asr_engine_split_prefers_quiet_cut_points():
+    """A hard cut landing mid-word truncates it in both neighbouring segments
+    and CTC tends to drop it entirely. Boundaries must land in the pauses.
+    """
+    sr = 16000
+    # 1s of tone, then 0.5s of silence, repeating.
+    block = np.concatenate(
+        [
+            np.sin(2 * np.pi * 220 * np.arange(sr) / sr).astype(np.float32),
+            np.zeros(sr // 2, dtype=np.float32),
+        ]
+    )
+    audio = np.tile(block, 40)
+
+    segments = ASREngine.split(audio, sr * 18, sr * 2)
+
+    period = sr + sr // 2
+    boundaries = np.cumsum([len(s) for s in segments])[:-1]
+    assert len(boundaries) > 0
+    # phase >= sr means the boundary sits in a silent gap, not in the tone.
+    assert all(b % period >= sr for b in boundaries)
+
+
+def test_asr_engine_split_is_lossless_and_bounded():
+    sr = 16000
+    audio = np.random.RandomState(0).randn(sr * 87).astype(np.float32)
+
+    segments = ASREngine.split(audio, sr * 18, sr * 2)
+
+    assert np.array_equal(np.concatenate(segments), audio)
+    assert all(len(s) <= sr * 18 for s in segments)
+
+
+def test_asr_engine_split_without_search_uses_fixed_cuts():
+    """boundary_search_samples=0 must reproduce plain fixed-size slicing."""
+    sr = 16000
+    audio = np.random.RandomState(0).randn(sr * 50).astype(np.float32)
+    max_samples = sr * 18
+
+    segments = ASREngine.split(audio, max_samples, 0)
+    expected = [
+        audio[i : i + max_samples] for i in range(0, audio.size, max_samples)
+    ]
+
+    assert len(segments) == len(expected)
+    assert all(np.array_equal(a, b) for a, b in zip(segments, expected))
+
+
+def test_asr_engine_split_keeps_segments_long_on_flat_audio():
+    """Flat-energy audio ties on every frame; the cut must stay at the far end
+    of the search window rather than always jumping to its start.
+    """
+    sr = 16000
+    audio = np.zeros(sr * 50, dtype=np.float32)
+
+    segments = ASREngine.split(audio, sr * 18, sr * 2)
+
+    assert len(segments[0]) > sr * 17
 
 
 @pytest.fixture
