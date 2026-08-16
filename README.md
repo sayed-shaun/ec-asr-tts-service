@@ -29,11 +29,11 @@ Bengali ASR (automatic speech recognition): a NeMo Conformer-CTC model served wi
 
 ## Current Model
 
-- **Checkpoint:** [`titu_stt_bn_conformer_large`](https://huggingface.co/hishab/titu_stt_bn_conformer_large) — pulled from Hugging Face at load time, not hosted by this project
+- **Checkpoint:** [`BanglaConformer`](https://huggingface.co/bengaliAI/BanglaConformer) — pulled from Hugging Face at load time, not hosted by this project
 - **Architecture:** [Conformer](https://arxiv.org/abs/2005.08100) (Gulati et al., 2020) — CTC decoding, fine-tuned for Bengali (`bn`)
 - **Input:** 16 kHz mono (`SAMPLE_RATE`)
-- **License:** CC-BY-NC-4.0 (non-commercial)
-- **Swap it:** set `MODEL_NAME` (see [Config](#config)) to the smaller, faster [`titu_stt_bn_fastconformer`](https://huggingface.co/hishab/titu_stt_bn_fastconformer) checkpoint, same family — lower accuracy but higher throughput (see `outputs/benchmark_report.pdf`). `GET /api/v1/asr/info` reports whichever one is actually loaded.
+- **License:** MIT (commercial use OK) — swapped in from `hishab/titu_stt_bn_conformer_large` (CC-BY-NC-4.0, non-commercial) for that reason
+- **Swap it:** set `CONFORMER_MODEL_NAME` (see [Config](#config)) to any other NeMo Conformer-CTC checkpoint. `GET /api/v1/asr/info` reports whichever engine/model is actually loaded. A second engine, `Wav2Vec2Engine`, is selectable via `ENGINE=wav2vec2` (see [Config](#config)).
 
 **Inference notes**
 
@@ -68,7 +68,7 @@ flowchart LR
     subgraph LitServe["LitServe service — internal — litserver:8000"]
         Predict["POST /predict"]
         LitAPI["ASRLitAPI: decode_request -> predict -> encode_response"]
-        Engine["ASREngine (NeMo model, GPU)"]
+        Engine["ConformerEngine / Wav2Vec2Engine (settings.ENGINE)"]
         Health["GET /health"]
     end
 
@@ -167,7 +167,7 @@ pip install -e ".[dev,serve]"
 pytest -q
 ```
 
-`serve` is required alongside `dev` because the tests exercise `ASREngine`/`ASRLitAPI` directly (model mocked), which import `torch`/`numpy`.
+`serve` is required alongside `dev` because the tests exercise `ConformerEngine`/`ASRLitAPI` directly (model mocked), which import `torch`/`numpy`.
 
 ---
 

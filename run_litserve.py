@@ -8,6 +8,7 @@ if __name__ == "__main__":
     configure_logging()
     server = create_litserve_server()
     logger.info(
-        f"Starting LitServe model server ({settings.MODEL_NAME}) on " f"0.0.0.0:8000"
+        f"Starting LitServe model server ({settings.ACTIVE_MODEL_NAME}) on "
+        f"0.0.0.0:8000"
     )
     server.run(host="0.0.0.0", port=8000, generate_client_file=False)

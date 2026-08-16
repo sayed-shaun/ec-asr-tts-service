@@ -16,9 +16,7 @@ text — the failure mode is "did nothing", not "mangled a sentence".
 
 import re
 
-# Bengali 0-99 is largely irregular, so it needs a table rather than
-# composition rules. Spelling variants observed in this model's output are
-# listed alongside the standard form.
+
 _SMALL = {
     "শূন্য": 0,
     "এক": 1,

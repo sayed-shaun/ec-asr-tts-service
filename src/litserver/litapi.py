@@ -6,8 +6,12 @@ from loguru import logger
 
 from src.api.v1.asr.schema import AsrRequest, AsrResponse, Output
 from src.core.config import settings
-from src.litserver.engine import ASREngine
+from src.litserver.engine.base import BaseEngine
+from src.litserver.engine.conformer import ConformerEngine
+from src.litserver.engine.wav2vec2 import Wav2Vec2Engine
+from src.litserver.engine.whisper import WhisperEngine
 from src.utils.audio import decode_base64_audio, warm_audio_decoder
+from src.utils.bn_text_repair import repair_stray_vowel_signs
 from src.utils.itn import bengali_numerals_to_digits
 
 # Bare numerals below this stay spelled out; measured sweep over the 1322-clip
@@ -17,8 +21,8 @@ ITN_MIN_VALUE = 10
 
 
 class ASRLitAPI(ls.LitAPI):
-    """Serves hishab/titu_stt_bn_fastconformer (NeMo FastConformer CTC) over
-    HTTP.
+    """Serves Bengali ASR over HTTP via a pluggable engine (settings.ENGINE
+    selects ConformerEngine, Wav2Vec2Engine, or WhisperEngine).
     """
 
     def setup(self, device: str) -> None:
@@ -28,11 +32,7 @@ class ASRLitAPI(ls.LitAPI):
         audio-decode half of the request path, which is the larger of the two
         one-off costs.
         """
-        self.engine = ASREngine(
-            model_name=settings.MODEL_NAME,
-            device=device,
-            max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
-        )
+        self.engine = self.build_engine(device)
         self.engine.load(sample_rate=settings.SAMPLE_RATE)
 
         try:
@@ -40,6 +40,26 @@ class ASRLitAPI(ls.LitAPI):
             logger.info("Audio decoder warmed up")
         except Exception as exc:
             logger.warning(f"Audio decoder warmup failed (continuing anyway): {exc}")
+
+    @staticmethod
+    def build_engine(device: str) -> BaseEngine:
+        if settings.ENGINE == "wav2vec2":
+            return Wav2Vec2Engine(
+                model_name=settings.WAV2VEC2_MODEL_NAME,
+                device=device,
+                max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
+            )
+        if settings.ENGINE == "whisper":
+            return WhisperEngine(
+                model_name=settings.WHISPER_MODEL_NAME,
+                device=device,
+                max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
+            )
+        return ConformerEngine(
+            model_name=settings.CONFORMER_MODEL_NAME,
+            device=device,
+            max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
+        )
 
     def decode_request(self, request: AsrRequest) -> dict:
         sample_rate = request.config.samplingRate or settings.SAMPLE_RATE
@@ -69,13 +89,15 @@ class ASRLitAPI(ls.LitAPI):
     def encode_response(self, output: dict) -> AsrResponse:
         """Serialize transcripts, rewriting spelled-out numbers as digits.
 
-        Applied here rather than in ASREngine so the engine stays purely about
+        Applied here rather than in the engine so the engine stays purely about
         recognition, and so it lands after per-segment texts are joined — a
         number split across a segment boundary would otherwise never be seen
         as one numeral run.
         """
         time_taken = time.time() - output["received_at"]
         texts = output["transcriptions"]
+        if settings.ENGINE == "wav2vec2":
+            texts = [repair_stray_vowel_signs(text) for text in texts]
         if settings.ITN_ENABLED:
             texts = [
                 bengali_numerals_to_digits(text, min_value=ITN_MIN_VALUE)

@@ -37,7 +37,7 @@ async def info() -> dict:
     model itself.
     """
     return {
-        "model": settings.MODEL_NAME,
+        "model": settings.ACTIVE_MODEL_NAME,
         "language": "bn",
         "sample_rate": settings.SAMPLE_RATE,
     }

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import httpx
 import numpy as np
 import pytest
+import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -20,9 +21,11 @@ from src.api.v1.asr.router import router as asr_router
 from src.api.v1.asr.schema import AsrRequest
 from src.api.v1.live_cc.router import router as live_cc_router
 from src.core.config import settings
-from src.litserver.engine import ASREngine
+from src.litserver.engine.conformer import ConformerEngine
+from src.litserver.engine.whisper import WhisperEngine
 from src.litserver.litapi import ASRLitAPI
 from src.utils.audio import decode_base64_audio
+from src.utils.bn_text_repair import repair_stray_vowel_signs
 from src.utils.itn import bengali_numerals_to_digits as itn
 
 
@@ -48,7 +51,7 @@ def test_info_endpoint(info_client):
     resp = info_client.get("/api/v1/asr/info")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["model"] == settings.MODEL_NAME
+    assert body["model"] == settings.ACTIVE_MODEL_NAME
 
 
 @pytest.fixture
@@ -147,18 +150,18 @@ def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
 
 def test_is_non_speech_flags_sparse_hallucinations():
     """Outputs actually observed from silence, noise, tone and music."""
-    assert ASREngine.is_non_speech("তেন", 5.0)
-    assert ASREngine.is_non_speech("ত", 3.0)
-    assert ASREngine.is_non_speech("সগগগগগগ্গগ্গেন", 5.0)
-    assert ASREngine.is_non_speech("স", 15.0)
+    assert ConformerEngine.is_non_speech("তেন", 5.0)
+    assert ConformerEngine.is_non_speech("ত", 3.0)
+    assert ConformerEngine.is_non_speech("সগগগগগগ্গগ্গেন", 5.0)
+    assert ConformerEngine.is_non_speech("স", 15.0)
 
 
 def test_is_non_speech_keeps_real_speech():
     """Real FLEURS speech never fell below 4.46 chars/sec over 1322 clips."""
     sentence = "জার্মানির অনেক বেক করা খাবারগুলিতে বাদাম পাওয়া যায়"
-    assert not ASREngine.is_non_speech(sentence, 8.0)
+    assert not ConformerEngine.is_non_speech(sentence, 8.0)
     # A short utterance in a short segment is dense enough to keep.
-    assert not ASREngine.is_non_speech("হ্যালো", 1.0)
+    assert not ConformerEngine.is_non_speech("হ্যালো", 1.0)
 
 
 def test_is_non_speech_absolute_cap_protects_short_real_phrases():
@@ -167,13 +170,13 @@ def test_is_non_speech_absolute_cap_protects_short_real_phrases():
     """
     phrase = "আমি তোমাকে বলেছি ভাই"  # > NON_SPEECH_MAX_CHARS
     assert len("".join(phrase.split())) > 15
-    assert not ASREngine.is_non_speech(phrase, 18.0)
+    assert not ConformerEngine.is_non_speech(phrase, 18.0)
 
 
 def test_is_non_speech_ignores_empty_and_bad_duration():
-    assert not ASREngine.is_non_speech("", 5.0)
-    assert not ASREngine.is_non_speech("   ", 5.0)
-    assert not ASREngine.is_non_speech("তেন", 0.0)
+    assert not ConformerEngine.is_non_speech("", 5.0)
+    assert not ConformerEngine.is_non_speech("   ", 5.0)
+    assert not ConformerEngine.is_non_speech("তেন", 0.0)
 
 
 def test_transcribe_drops_non_speech_segment_but_keeps_speech():
@@ -181,7 +184,7 @@ def test_transcribe_drops_non_speech_segment_but_keeps_speech():
     appended a stray character to an otherwise-correct transcript.
     """
     sr = 16000
-    engine = ASREngine(model_name="dummy", device="cpu", max_segment_seconds=18.0)
+    engine = ConformerEngine(model_name="dummy", device="cpu", max_segment_seconds=18.0)
     engine.model = MagicMock()
     engine.model.transcribe.return_value = [
         "আমি ভাত খেয়ে বাড়িতে চলে গিয়েছিলাম আজকে সকালে",
@@ -195,9 +198,29 @@ def test_transcribe_drops_non_speech_segment_but_keeps_speech():
     assert not result[0].endswith("ত ")
 
 
+def test_whisper_engine_drops_non_speech_hallucination():
+    """Regression: this repo's Whisper checkpoint decodes pure silence to the
+    literal string "<>", which then popped up repeatedly in live captions
+    since WhisperEngine (unlike ConformerEngine) never filtered it.
+    """
+    sr = 16000
+    engine = WhisperEngine(model_name="dummy", device="cpu", max_segment_seconds=28.0)
+    engine.processor = MagicMock()
+    engine.processor.return_value.input_features = torch.zeros(1, 1, 1)
+    engine.processor.batch_decode.return_value = ["<>"]
+    engine.model = MagicMock()
+    engine.model.generate.return_value = torch.zeros(1, 1, dtype=torch.long)
+    engine.decoder_input_ids = torch.zeros(1, 1, dtype=torch.long)
+
+    audio = np.zeros(int(sr * 3), dtype=np.float32)
+    result = engine.transcribe([audio], batch_size=1, sample_rate=sr)
+
+    assert result == [""]
+
+
 def test_transcribe_non_speech_drop_can_be_disabled():
     sr = 16000
-    engine = ASREngine(
+    engine = ConformerEngine(
         model_name="dummy",
         device="cpu",
         max_segment_seconds=18.0,
@@ -293,6 +316,33 @@ def lit_api():
     return api
 
 
+def test_repair_stray_vowel_signs_reattaches_floating_matra():
+    """Regression: wav2vec2 CTC decoding sometimes emits a dependent vowel
+    sign as its own space-separated "word" instead of attached to the
+    preceding consonant.
+    """
+    assert repair_stray_vowel_signs("কাছ েেে কিছুই") == "কাছে কিছুই"
+    assert repair_stray_vowel_signs("স্পা ে প্রাচীর") == "স্পাে প্রাচীর"
+
+
+def test_repair_stray_vowel_signs_leaves_normal_text_unchanged():
+    for text in ("আজকে আমি বাড়িতে গিয়েছিলাম", "", "   "):
+        assert repair_stray_vowel_signs(text) == text
+
+
+def test_lit_api_applies_vowel_repair_only_for_wav2vec2(lit_api, monkeypatch):
+    monkeypatch.setattr(settings, "ENGINE", "wav2vec2")
+    monkeypatch.setattr(settings, "ITN_ENABLED", False)
+    lit_api.engine.transcribe.return_value = ["কাছ েেে কিছুই"]
+    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
+    prediction = lit_api.predict(lit_api.decode_request(request))
+    assert lit_api.encode_response(prediction).output[0].source == "কাছে কিছুই"
+
+    monkeypatch.setattr(settings, "ENGINE", "conformer")
+    prediction = lit_api.predict(lit_api.decode_request(request))
+    assert lit_api.encode_response(prediction).output[0].source == "কাছ েেে কিছুই"
+
+
 def test_lit_api_full_cycle(lit_api):
     request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
     decoded = lit_api.decode_request(request)
@@ -310,7 +360,7 @@ def test_lit_api_full_cycle(lit_api):
 def test_asr_engine_splits_long_audio_into_segments():
     # drop_non_speech off: the one-character stub transcripts below are far too
     # sparse to pass the non-speech gate, and this test is about splitting.
-    engine = ASREngine(
+    engine = ConformerEngine(
         model_name="dummy",
         device="cpu",
         max_segment_seconds=1.0,
@@ -329,7 +379,7 @@ def test_asr_engine_splits_long_audio_into_segments():
 
 def test_asr_engine_leaves_short_audio_unsplit():
     # See above: stub transcript is too short for the non-speech gate.
-    engine = ASREngine(
+    engine = ConformerEngine(
         model_name="dummy",
         device="cpu",
         max_segment_seconds=18.0,
@@ -351,7 +401,7 @@ def test_asr_engine_respects_custom_sample_rate_for_segment_length():
     not a hardcoded 16kHz. Exact boundaries depend on where split() finds a
     quiet point, so this asserts the length ceiling rather than a fixed count.
     """
-    engine = ASREngine(model_name="dummy", device="cpu", max_segment_seconds=1.0)
+    engine = ConformerEngine(model_name="dummy", device="cpu", max_segment_seconds=1.0)
     engine.model = MagicMock()
     engine.model.transcribe.side_effect = lambda audio, **kw: [
         f"s{i}" for i in range(len(audio))
@@ -380,7 +430,7 @@ def test_asr_engine_split_prefers_quiet_cut_points():
     )
     audio = np.tile(block, 40)
 
-    segments = ASREngine.split(audio, sr * 18, sr * 2)
+    segments = ConformerEngine.split(audio, sr * 18, sr * 2)
 
     period = sr + sr // 2
     boundaries = np.cumsum([len(s) for s in segments])[:-1]
@@ -393,7 +443,7 @@ def test_asr_engine_split_is_lossless_and_bounded():
     sr = 16000
     audio = np.random.RandomState(0).randn(sr * 87).astype(np.float32)
 
-    segments = ASREngine.split(audio, sr * 18, sr * 2)
+    segments = ConformerEngine.split(audio, sr * 18, sr * 2)
 
     assert np.array_equal(np.concatenate(segments), audio)
     assert all(len(s) <= sr * 18 for s in segments)
@@ -405,7 +455,7 @@ def test_asr_engine_split_without_search_uses_fixed_cuts():
     audio = np.random.RandomState(0).randn(sr * 50).astype(np.float32)
     max_samples = sr * 18
 
-    segments = ASREngine.split(audio, max_samples, 0)
+    segments = ConformerEngine.split(audio, max_samples, 0)
     expected = [
         audio[i : i + max_samples] for i in range(0, audio.size, max_samples)
     ]
@@ -421,7 +471,7 @@ def test_asr_engine_split_keeps_segments_long_on_flat_audio():
     sr = 16000
     audio = np.zeros(sr * 50, dtype=np.float32)
 
-    segments = ASREngine.split(audio, sr * 18, sr * 2)
+    segments = ConformerEngine.split(audio, sr * 18, sr * 2)
 
     assert len(segments[0]) > sr * 17
 

@@ -18,4 +18,5 @@ def create_litserve_server() -> ls.LitServer:
         devices=settings.DEVICES,
         workers_per_device=settings.WORKERS_PER_DEVICE,
         healthcheck_path="/health",
+        timeout=settings.LITSERVE_TIMEOUT,
     )

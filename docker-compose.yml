@@ -5,6 +5,11 @@ services:
       dockerfile: litserver.Dockerfile
     env_file:
       - .env
+    environment:
+      # Reduces CUDA allocator fragmentation from repeated variable-length
+      # batches (the exact scenario ASR inference produces) -- suggested
+      # directly by PyTorch's own OOM error message.
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
     networks:
       - asr-net
     volumes:

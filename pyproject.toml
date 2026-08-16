@@ -18,8 +18,12 @@ dependencies = [
 [project.optional-dependencies]
 serve = [
     "nemo_toolkit[asr]>=2.0.0",
+    "transformers>=4.40.0",
     "litserve>=0.2.9",
-    "librosa>=0.10.0",
+    # <1.0: librosa 1.0 dropped the automatic soundfile->audioread fallback
+    # decode_base64_audio (src/utils/audio.py) relies on for compressed
+    # formats (webm/opus, mp3, ...) -- e.g. what browser MediaRecorder sends.
+    "librosa>=0.10.0,<1.0",
     "soundfile>=0.12.1",
     "numpy>=1.24.0",
 ]

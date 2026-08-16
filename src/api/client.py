@@ -11,8 +11,15 @@ calls, same as before this existed.
 
 import httpx
 
+from src.core.config import settings
+
 LITSERVE_BASE_URL = "http://litserver:8000"
 PREDICT_PATH = "/predict"
+
+# Must stay above settings.LITSERVE_TIMEOUT: LitServe's own queue timeout
+# should be what returns a 504 to the client, not this connection aborting
+# first and racing it.
+DEFAULT_TIMEOUT = settings.LITSERVE_TIMEOUT + 10
 
 
 def get_litserve_client() -> httpx.AsyncClient:
@@ -20,7 +27,7 @@ def get_litserve_client() -> httpx.AsyncClient:
 
 
 async def transcribe(
-    client: httpx.AsyncClient, audio_content_b64: str, timeout: float = 120
+    client: httpx.AsyncClient, audio_content_b64: str, timeout: float = DEFAULT_TIMEOUT
 ) -> httpx.Response:
     """POST base64 audio to LitServe's /predict, return the raw response.
 
@@ -39,7 +46,7 @@ async def transcribe(
 
 
 async def transcribe_request(
-    client: httpx.AsyncClient, payload: dict, timeout: float = 120
+    client: httpx.AsyncClient, payload: dict, timeout: float = DEFAULT_TIMEOUT
 ) -> httpx.Response:
     """POST an already-built AsrRequest-shaped payload straight through to
     LitServe's /predict.

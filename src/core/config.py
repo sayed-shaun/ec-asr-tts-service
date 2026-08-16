@@ -8,14 +8,19 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    MODEL_NAME: str = "hishab/titu_stt_bn_conformer_large"
+    ENGINE: Literal["conformer", "wav2vec2", "whisper"] = "conformer"
+    CONFORMER_MODEL_NAME: str = "bengaliAI/BanglaConformer"
+    WAV2VEC2_MODEL_NAME: str = "SayedShaun/bangla-wave2vec2-unigram"
+    WHISPER_MODEL_NAME: str = "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     DEVICES: Union[int, Literal["auto"]] = 1
 
-    WORKERS_PER_DEVICE: int = 2
+    WORKERS_PER_DEVICE: int = 1
     TRANSCRIBE_BATCH_SIZE: int = 4
     SAMPLE_RATE: int = 16000
-    MAX_SEGMENT_SECONDS: float = 18.0
+    MAX_SEGMENT_SECONDS: float = 8.0
+
+    LITSERVE_TIMEOUT: float = 120.0
 
     ITN_ENABLED: bool = True
 
@@ -27,6 +32,15 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
+
+    @property
+    def ACTIVE_MODEL_NAME(self) -> str:
+        """Whichever checkpoint settings.ENGINE will actually load."""
+        if self.ENGINE == "wav2vec2":
+            return self.WAV2VEC2_MODEL_NAME
+        if self.ENGINE == "whisper":
+            return self.WHISPER_MODEL_NAME
+        return self.CONFORMER_MODEL_NAME
 
 
 settings = Settings()
