@@ -8,10 +8,11 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    ENGINE: Literal["conformer", "wav2vec2", "whisper"] = "conformer"
+    ENGINE: Literal["conformer", "wav2vec2", "whisper", "zipformer"] = "conformer"
     CONFORMER_MODEL_NAME: str = "bengaliAI/BanglaConformer"
     WAV2VEC2_MODEL_NAME: str = "SayedShaun/bangla-wave2vec2-unigram"
     WHISPER_MODEL_NAME: str = "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
+    ZIPFORMER_MODEL_NAME: str = "alphacep/vosk-model-small-streaming-bn"
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     DEVICES: Union[int, Literal["auto"]] = 1
 
@@ -40,6 +41,8 @@ class Settings(BaseSettings):
             return self.WAV2VEC2_MODEL_NAME
         if self.ENGINE == "whisper":
             return self.WHISPER_MODEL_NAME
+        if self.ENGINE == "zipformer":
+            return self.ZIPFORMER_MODEL_NAME
         return self.CONFORMER_MODEL_NAME
 
 
