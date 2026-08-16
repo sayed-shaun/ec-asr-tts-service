@@ -10,6 +10,7 @@ from src.litserver.engine.base import BaseEngine
 from src.litserver.engine.conformer import ConformerEngine
 from src.litserver.engine.wav2vec2 import Wav2Vec2Engine
 from src.litserver.engine.whisper import WhisperEngine
+from src.litserver.engine.zipformer import ZipformerEngine
 from src.utils.audio import decode_base64_audio, warm_audio_decoder
 from src.utils.bn_text_repair import repair_stray_vowel_signs
 from src.utils.itn import bengali_numerals_to_digits
@@ -22,7 +23,8 @@ ITN_MIN_VALUE = 10
 
 class ASRLitAPI(ls.LitAPI):
     """Serves Bengali ASR over HTTP via a pluggable engine (settings.ENGINE
-    selects ConformerEngine, Wav2Vec2Engine, or WhisperEngine).
+    selects ConformerEngine, Wav2Vec2Engine, WhisperEngine, or
+    ZipformerEngine).
     """
 
     def setup(self, device: str) -> None:
@@ -55,6 +57,8 @@ class ASRLitAPI(ls.LitAPI):
                 device=device,
                 max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
             )
+        if settings.ENGINE == "zipformer":
+            return ZipformerEngine(model_name=settings.ZIPFORMER_MODEL_NAME)
         return ConformerEngine(
             model_name=settings.CONFORMER_MODEL_NAME,
             device=device,
