@@ -179,6 +179,16 @@ def test_is_non_speech_ignores_empty_and_bad_duration():
     assert not ConformerEngine.is_non_speech("তেন", 0.0)
 
 
+def test_is_non_speech_flags_literal_hallucination_on_short_segments():
+    """This repo's Whisper checkpoint decodes silence to the literal "<>" --
+    on a short segment its density is too high to trip the sparse-output
+    heuristic (2 chars over 0.5s exceeds NON_SPEECH_MIN_CHAR_DENSITY), so it
+    must be caught as a known literal instead.
+    """
+    assert ConformerEngine.is_non_speech("<>", 0.5)
+    assert ConformerEngine.is_non_speech("<>", 5.0)
+
+
 def test_transcribe_drops_non_speech_segment_but_keeps_speech():
     """The reported symptom: a music/silence tail became its own segment and
     appended a stray character to an otherwise-correct transcript.

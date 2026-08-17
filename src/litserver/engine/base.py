@@ -4,6 +4,7 @@ import numpy as np
 
 NON_SPEECH_MAX_CHARS = 15
 NON_SPEECH_MIN_CHAR_DENSITY = 3.0
+NON_SPEECH_LITERALS = {"<>"}
 
 
 class BaseEngine(ABC):
@@ -81,11 +82,18 @@ class BaseEngine(ABC):
 
         Silence, noise and music all decode to a handful of stray characters
         instead of nothing (e.g. this repo's Whisper checkpoint decodes pure
-        silence to the literal string "<>"). Both thresholds must trip: the
-        output has to be tiny *and* sparse relative to the audio it came
-        from. See the module constants for the measured separation.
+        silence to the literal string "<>"). Known literals like that are
+        flagged unconditionally -- on short segments the density check below
+        can't tell "<>" apart from real speech (2 chars over ~0.5s is denser
+        than NON_SPEECH_MIN_CHAR_DENSITY), so it must not gate them. Anything
+        else still needs both thresholds to trip: the output has to be tiny
+        *and* sparse relative to the audio it came from. See the module
+        constants for the measured separation.
         """
-        chars = len("".join(text.split()))
+        stripped = "".join(text.split())
+        if stripped in NON_SPEECH_LITERALS:
+            return True
+        chars = len(stripped)
         if chars == 0:
             return False
         if chars > NON_SPEECH_MAX_CHARS or duration_seconds <= 0:

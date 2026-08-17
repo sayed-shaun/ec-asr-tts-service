@@ -117,7 +117,10 @@ class WhisperEngine(BaseEngine):
                     max_new_tokens=self.max_new_tokens,
                 )
             texts.extend(
-                self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
+                text.replace("<>", "").strip()
+                for text in self.processor.batch_decode(
+                    predicted_ids, skip_special_tokens=True
+                )
             )
 
         if self.drop_non_speech:
