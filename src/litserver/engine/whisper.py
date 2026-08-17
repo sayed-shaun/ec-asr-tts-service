@@ -19,7 +19,7 @@ class WhisperEngine(BaseEngine):
     ):
         self.model_name = model_name
         self.device = self.resolve_device(device)
-        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+        self.dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
         self.max_segment_seconds = max_segment_seconds
         self.boundary_search_seconds = boundary_search_seconds
         self.language = language
@@ -37,7 +37,10 @@ class WhisperEngine(BaseEngine):
             f"Loading Whisper model '{self.model_name}' on device '{self.device}'"
         )
         self.processor = AutoProcessor.from_pretrained(self.model_name)
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(self.model_name)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            self.model_name, dtype=self.dtype
+        )
+        self.model = self.model.to(self.device)
 
         prompt_ids = self.processor.get_decoder_prompt_ids(
             language=self.language, task="transcribe"
@@ -46,9 +49,6 @@ class WhisperEngine(BaseEngine):
         self.decoder_input_ids = torch.tensor(
             [[bos] + [token_id for _, token_id in prompt_ids]]
         )
-        self.model = self.model.to(self.device)
-        if self.device == "cuda":
-            self.model = self.model.half()
         self.model.eval()
 
         if warmup_seconds > 0:

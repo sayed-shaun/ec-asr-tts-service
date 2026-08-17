@@ -45,7 +45,7 @@ class ConformerEngine(BaseEngine):
         self.model.change_decoding_strategy(decoding_cfg)
         self.model = self.model.to(self.device)
         self.model.eval()
-        if self.device == "cuda":
+        if self.device.startswith("cuda"):
             self.model = self.model.half()
 
         if warmup_seconds > 0:

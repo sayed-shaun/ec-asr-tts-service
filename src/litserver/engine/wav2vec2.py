@@ -17,7 +17,7 @@ class Wav2Vec2Engine(BaseEngine):
     ):
         self.model_name = model_name
         self.device = self.resolve_device(device)
-        self.dtype = torch.float16 if self.device == "cuda" else torch.float32
+        self.dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
         self.max_segment_seconds = max_segment_seconds
         self.boundary_search_seconds = boundary_search_seconds
         self.processor = None
@@ -32,7 +32,7 @@ class Wav2Vec2Engine(BaseEngine):
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.model = AutoModelForCTC.from_pretrained(self.model_name)
         self.model = self.model.to(self.device)
-        if self.device == "cuda":
+        if self.device.startswith("cuda"):
             self.model = self.model.half()
         self.model.eval()
 
