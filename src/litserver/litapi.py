@@ -56,6 +56,7 @@ class ASRLitAPI(ls.LitAPI):
                 model_name=settings.WHISPER_MODEL_NAME,
                 device=device,
                 max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
+                load_in_8bit=settings.WHISPER_LOAD_IN_8BIT,
             )
         if settings.ENGINE == "zipformer":
             return ZipformerEngine(model_name=settings.ZIPFORMER_MODEL_NAME)

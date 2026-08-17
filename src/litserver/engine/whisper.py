@@ -16,6 +16,7 @@ class WhisperEngine(BaseEngine):
         boundary_search_seconds: float = 2.0,
         language: str = "bn",
         drop_non_speech: bool = True,
+        load_in_8bit: bool = False,
     ):
         self.model_name = model_name
         self.device = self.resolve_device(device)
@@ -24,6 +25,7 @@ class WhisperEngine(BaseEngine):
         self.boundary_search_seconds = boundary_search_seconds
         self.language = language
         self.drop_non_speech = drop_non_speech
+        self.load_in_8bit = load_in_8bit and self.device.startswith("cuda")
 
         self.max_new_tokens = max(64, min(int(max_segment_seconds * 20), 448))
         self.processor = None
@@ -37,10 +39,20 @@ class WhisperEngine(BaseEngine):
             f"Loading Whisper model '{self.model_name}' on device '{self.device}'"
         )
         self.processor = AutoProcessor.from_pretrained(self.model_name)
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            self.model_name, dtype=self.dtype
-        )
-        self.model = self.model.to(self.device)
+        if self.load_in_8bit:
+            from transformers import BitsAndBytesConfig
+
+            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_name,
+                dtype=self.dtype,
+                quantization_config=BitsAndBytesConfig(load_in_8bit=True),
+                device_map={"": self.device},
+            )
+        else:
+            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_name, dtype=self.dtype
+            )
+            self.model = self.model.to(self.device)
 
         prompt_ids = self.processor.get_decoder_prompt_ids(
             language=self.language, task="transcribe"

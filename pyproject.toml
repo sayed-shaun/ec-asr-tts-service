@@ -28,6 +28,8 @@ serve = [
     "numpy>=1.24.0",
     "sherpa-onnx>=1.10.0",
     "huggingface-hub>=0.23.0",
+    "bitsandbytes>=0.43.0",
+    "accelerate>=0.30.0",
 ]
 dev = [
     "pytest>=8.0.0",

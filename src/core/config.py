@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     CONFORMER_MODEL_NAME: str = "bengaliAI/BanglaConformer"
     WAV2VEC2_MODEL_NAME: str = "SayedShaun/bangla-wave2vec2-unigram"
     WHISPER_MODEL_NAME: str = "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
+    WHISPER_LOAD_IN_8BIT: bool = False
     ZIPFORMER_MODEL_NAME: str = "alphacep/vosk-model-small-streaming-bn"
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     DEVICES: Union[int, Literal["auto"]] = 1
