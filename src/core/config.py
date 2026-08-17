@@ -43,7 +43,12 @@ class Settings(BaseSettings):
             return self.WHISPER_MODEL_NAME
         if self.ENGINE == "zipformer":
             return self.ZIPFORMER_MODEL_NAME
-        return self.CONFORMER_MODEL_NAME
+        if self.ENGINE == "conformer":
+            return self.CONFORMER_MODEL_NAME
+        raise ValueError(
+            f"Unknown engine: {self.ENGINE}", 
+            "must be one of conformer, wav2vec2, whisper, zipformer"
+        )
 
 
 settings = Settings()
