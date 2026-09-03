@@ -1,5 +1,5 @@
 [project]
-name = "asr-inference-pipeline"
+name = "ec-asr-tts-service"
 version = "0.1.0"
 description = "Bengali speech-to-text service"
 requires-python = "==3.12.*"
