@@ -18,7 +18,6 @@ from pydantic import ValidationError
 
 from main import create_gateway_app
 from src.api.client import PREDICT_PATH, SYNTHESIZE_PATH
-from src.api.v1.asr.router import router as asr_router
 from src.api.v1.asr.schema import AsrRequest
 from src.api.v1.tts.router import router as tts_router
 from src.api.v1.tts.schema import TtsRequest
@@ -52,9 +51,11 @@ def asr_client(monkeypatch):
     the client's httpx.AsyncClient so no real socket opens.
     """
     predict_app = FastAPI()
+    captured: dict = {}
 
     @predict_app.post(PREDICT_PATH)
     async def fake_predict(payload: dict) -> dict:
+        captured["payload"] = payload
         return {
             "taskType": "asr",
             "output": [{"source": "হ্যালো"}],
@@ -71,8 +72,8 @@ def asr_client(monkeypatch):
 
     monkeypatch.setattr("src.api.client.httpx.AsyncClient", fake_async_client)
 
-    app = FastAPI()
-    app.include_router(asr_router)
+    app = create_gateway_app()
+    app.state.captured = captured
     return TestClient(app)
 
 
@@ -776,25 +777,56 @@ def test_gateway_sets_cors_headers():
     assert resp.headers["access-control-allow-origin"] == "*"
 
 
-def test_asr_route_matches_what_the_chatbot_ui_posts(asr_client):
-    """The UI posts a MediaRecorder blob plus model_type and reads
-    output[0].source. Caddy proxies /asr* straight here, so it lives on the
-    ASR service itself, not on the chatbot."""
-    wav = base64.b64decode(make_wav_base64())
+def test_asr_route_speaks_the_java_contract(asr_client):
+    """The long-standing contract: base64 clips under `audio`, language nested
+    under `config.language`, and output[0].source back. Caddy proxies /asr*
+    straight here, so it lives on the ASR service itself."""
     resp = asr_client.post(
         "/asr",
-        files={"file": ("recording.webm", wav, "audio/webm")},
+        json={
+            "config": {"language": {"sourceLanguage": "bn"}},
+            "audio": [{"audioContent": make_wav_base64()}],
+        },
     )
     assert resp.status_code == 200
     assert resp.json()["output"][0]["source"] == "হ্যালো"
 
 
-def test_asr_route_ignores_extra_form_fields(asr_client):
-    """The UI still posts model_type. An extra multipart field must not 422 the
-    request, or the browser breaks the moment the server stops declaring it."""
-    wav = base64.b64decode(make_wav_base64())
+def test_asr_route_forwards_the_body_verbatim(asr_client):
+    """Multiple clips and a non-default sourceLanguage must reach LitServe as
+    sent, rather than being flattened into one hardcoded bn request."""
     resp = asr_client.post(
         "/asr",
-        files={"file": ("recording.webm", wav, "audio/webm")},
+        json={
+            "config": {"language": {"sourceLanguage": "en"}},
+            "audio": [
+                {"audioContent": make_wav_base64()},
+                {"audioContent": make_wav_base64()},
+            ],
+        },
     )
     assert resp.status_code == 200
+    assert asr_client.app.state.captured["payload"] == {
+        "config": {"language": {"sourceLanguage": "en"}},
+        "audio": [
+            {"audioContent": make_wav_base64()},
+            {"audioContent": make_wav_base64()},
+        ],
+    }
+
+
+def test_asr_route_rejects_a_body_without_the_nested_config(asr_client):
+    """A flat body is not the contract; it must 422 rather than silently
+    transcribing with a default language."""
+    resp = asr_client.post("/asr", json={"audio": [{"audioContent": "abc"}]})
+    assert resp.status_code == 422
+
+
+def test_asr_route_no_longer_accepts_a_file_upload(asr_client):
+    """The contract carries base64 in the body. Callers holding a file use
+    POST /v1/audio/transcriptions instead."""
+    wav = base64.b64decode(make_wav_base64())
+    resp = asr_client.post(
+        "/asr", files={"file": ("recording.webm", wav, "audio/webm")}
+    )
+    assert resp.status_code == 422
