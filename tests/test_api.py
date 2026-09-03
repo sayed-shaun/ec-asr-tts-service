@@ -405,7 +405,11 @@ def test_chunker_holds_incomplete_clause_until_flush():
 
 @pytest.fixture
 def tts_client(monkeypatch):
-    """A fake LitServe /synthesize, wired in through the shared client."""
+    """A fake LitServe /synthesize, wired in through the shared client.
+
+    TTS_ENABLED is off by default, so the fixture opts in the way a deployment
+    that wants TTS does."""
+    monkeypatch.setattr(settings, "TTS_ENABLED", True)
     fake = FastAPI()
 
     @fake.post(SYNTHESIZE_PATH)

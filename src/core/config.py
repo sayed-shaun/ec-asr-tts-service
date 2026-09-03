@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     ZIPFORMER_MODEL_NAME: str = "alphacep/vosk-model-small-streaming-bn"
     ZIPFORMER_PROVIDER: Literal["cpu", "cuda"] = "cpu"
 
-    TTS_ENABLED: bool = True
+    TTS_ENABLED: bool = False
     TTS_MODEL_NAME: str = "ai4bharat/indic-parler-tts"
     TTS_VOICE: str = "Aditi"
     TTS_MAX_CHARS: int = 160
