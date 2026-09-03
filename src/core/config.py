@@ -32,11 +32,6 @@ class Settings(BaseSettings):
     LITSERVE_PORT: int = 8000
     CORS_ALLOW_ORIGINS: str = "*"
 
-    VOICEBOT_PORT: int = 8100
-    VOICEBOT_PCM_FRAME_MS: int = 100
-    VOICEBOT_INPUT_SAMPLE_RATE: int = 16000
-
-
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
 
@@ -49,6 +44,5 @@ class Settings(BaseSettings):
     def ACTIVE_TTS_MODEL_NAME(self) -> str | None:
         """Whichever TTS checkpoint the server will load, None when disabled."""
         return self.TTS_MODEL_NAME if self.TTS_ENABLED else None
-
 
 settings = Settings()

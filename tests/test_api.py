@@ -1,13 +1,11 @@
 import base64
 import io
-import json
 import pathlib
 import shutil
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -36,8 +34,6 @@ from src.litserver.zipformer.engine import ZipformerEngine
 from src.litserver.zipformer.layouts import DEFAULT, K2_FSA, VOSK_BN
 from src.utils.audio import decode_base64_audio
 from src.utils.itn import bengali_numerals_to_digits as itn
-from src.voicebot import app as voicebot_app
-from src.voicebot.app import pcm_to_float32
 
 
 def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
@@ -664,145 +660,6 @@ def test_plain_engine_speak_stream_yields_once():
     parts = list(engine.speak_stream("এক দুই তিন। চার পাঁচ ছয়।"))
     assert len(parts) == 1
     assert len(engine.calls) == 1
-
-
-class StubASRSession:
-    """A ZipformerSession-shaped stub: endpoints once the caller has sent
-    endpoint_after frames, so turn-taking is drivable from a test."""
-
-    def __init__(self, texts, endpoint_after=None):
-        self.texts = list(texts)
-        self.endpoint_after = endpoint_after
-        self.frames = 0
-        self.resets = 0
-        self.finished = False
-
-    def accept(self, samples, sample_rate=16000):
-        self.frames += 1
-        return self.texts[min(self.frames, len(self.texts)) - 1]
-
-    def is_endpoint(self):
-        return self.endpoint_after is not None and self.frames >= self.endpoint_after
-
-    def reset(self):
-        self.resets += 1
-        self.texts = [""]
-        self.endpoint_after = None
-
-    def finish(self, tail_padding_seconds=1.0, sample_rate=16000):
-        self.finished = True
-        return self.texts[-1]
-
-
-def voicebot_client(monkeypatch, session=None, tts_engine=None):
-    """Build the voicebot app with both models stubbed, so the sockets are
-    exercised without loading a checkpoint."""
-    asr = SimpleNamespace(load=lambda **kwargs: None, stream=lambda: session)
-    monkeypatch.setattr(voicebot_app.zipformer, "build", lambda device: asr)
-    monkeypatch.setattr(voicebot_app.parler, "build", lambda device: tts_engine)
-    monkeypatch.setattr(settings, "TTS_ENABLED", tts_engine is not None)
-    return TestClient(voicebot_app.create_voicebot_app())
-
-
-def pcm_frame(samples=1600):
-    return np.zeros(samples, dtype="<i2").tobytes()
-
-
-def test_voicebot_asr_emits_partials_then_a_final_on_endpoint(monkeypatch):
-    session = StubASRSession(["আমি", "আমি ভালো", "আমি ভালো আছি"], endpoint_after=3)
-    with voicebot_client(monkeypatch, session=session) as client:
-        with client.websocket_connect("/api/v1/voicebot/asr") as ws:
-            assert ws.receive_json()["type"] == "ready"
-            ws.send_bytes(pcm_frame())
-            assert ws.receive_json() == {"type": "partial", "text": "আমি"}
-            ws.send_bytes(pcm_frame())
-            assert ws.receive_json() == {"type": "partial", "text": "আমি ভালো"}
-            ws.send_bytes(pcm_frame())
-            assert ws.receive_json() == {"type": "final", "text": "আমি ভালো আছি"}
-    assert session.resets == 1
-
-
-def test_voicebot_asr_does_not_repeat_an_unchanged_partial(monkeypatch):
-    """A frame that decodes to no new text must stay silent, or the caller is
-    flooded with duplicates at frame rate."""
-    session = StubASRSession(["আমি", "আমি"])
-    with voicebot_client(monkeypatch, session=session) as client:
-        with client.websocket_connect("/api/v1/voicebot/asr") as ws:
-            ws.receive_json()
-            ws.send_bytes(pcm_frame())
-            assert ws.receive_json()["text"] == "আমি"
-            ws.send_bytes(pcm_frame())
-            ws.send_text(json.dumps({"type": "end"}))
-            assert ws.receive_json() == {"type": "final", "text": "আমি"}
-            assert ws.receive_json() == {"type": "done"}
-    assert session.finished
-
-
-def test_voicebot_tts_streams_pcm_frames_per_clause(monkeypatch):
-    engine = FakeTTSEngine()
-    with voicebot_client(monkeypatch, tts_engine=engine) as client:
-        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
-            assert ws.receive_json()["type"] == "ready"
-            ws.send_text(json.dumps({"type": "text", "text": "এক দুই তিন।"}))
-
-            start = ws.receive_json()
-            assert start["type"] == "audio_start"
-            assert start["sample_rate"] == 44100
-
-            received = 0
-            while received < start["bytes"]:
-                received += len(ws.receive_bytes())
-            assert received == start["bytes"]
-            assert ws.receive_json()["type"] == "audio_end"
-
-            ws.send_text(json.dumps({"type": "end"}))
-            assert ws.receive_json()["type"] == "done"
-    assert engine.calls == [("এক দুই তিন।", settings.TTS_VOICE, None)]
-
-
-def test_voicebot_tts_holds_an_incomplete_clause_until_flush(monkeypatch):
-    """Text arrives as LLM deltas; a clause is only spoken once complete."""
-    engine = FakeTTSEngine()
-    with voicebot_client(monkeypatch, tts_engine=engine) as client:
-        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
-            ws.receive_json()
-            ws.send_text(json.dumps({"type": "text", "text": "আমি ভালো"}))
-            ws.send_text(json.dumps({"type": "flush"}))
-            assert ws.receive_json()["type"] == "audio_start"
-    assert [call[0] for call in engine.calls] == ["আমি ভালো"]
-
-
-def test_voicebot_tts_cancel_is_barge_in(monkeypatch):
-    """Cancel bumps the generation, which drops queued clauses so the caller
-    stops hearing the old answer."""
-    engine = FakeTTSEngine()
-    with voicebot_client(monkeypatch, tts_engine=engine) as client:
-        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
-            ws.receive_json()
-            ws.send_text(json.dumps({"type": "cancel"}))
-            cancelled = ws.receive_json()
-            assert cancelled == {"type": "cancelled", "generation": 1}
-
-
-def test_voicebot_tts_rejects_an_unknown_voice(monkeypatch):
-    engine = FakeTTSEngine()
-    with voicebot_client(monkeypatch, tts_engine=engine) as client:
-        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
-            ws.receive_json()
-            ws.send_text(json.dumps({"type": "configure", "voice": "Nobody"}))
-            assert "unknown voice" in ws.receive_json()["message"]
-
-
-def test_voicebot_tts_socket_closes_when_tts_is_disabled(monkeypatch):
-    with voicebot_client(monkeypatch, session=StubASRSession([""])) as client:
-        with pytest.raises(Exception):
-            with client.websocket_connect("/api/v1/voicebot/tts") as ws:
-                ws.receive_json()
-
-
-def test_pcm_to_float32_round_trips_full_scale():
-    pcm = np.array([0, 16384, -16384], dtype="<i2").tobytes()
-    assert np.allclose(pcm_to_float32(pcm), [0.0, 0.5, -0.5])
 
 
 def test_zipformer_provider_defaults_to_cpu_and_is_configurable(monkeypatch):

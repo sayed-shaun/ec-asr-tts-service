@@ -136,7 +136,7 @@ class ZipformerEngine(BaseASREngine):
         """Open a live session that survives across many audio frames.
 
         transcribe() below is the batch path: it opens a stream, feeds it one
-        clip and closes it. A call has no such boundary, so a voicebot holds
+        clip and closes it. A live stream has no such boundary, so a caller holds
         one session for the whole turn and feeds it frames as they arrive.
         """
         if self.recognizer is None:

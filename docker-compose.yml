@@ -30,29 +30,6 @@ services:
               count: 1
               capabilities: [gpu]
 
-  voicebot:
-    build:
-      context: .
-      dockerfile: litserver.Dockerfile
-      args:
-        SHERPA_ONNX_CUDA_VERSION: "${SHERPA_ONNX_CUDA_VERSION:-}"
-    command: ["python", "run_voicebot.py"]
-    ports:
-      - "${VOICEBOT_PORT:-8100}:${VOICEBOT_PORT:-8100}"
-    env_file:
-      - .env
-    networks:
-      - asr-net
-    volumes:
-      - hf-cache:/opt/cache/huggingface
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
   gateway:
     build:
       context: .
