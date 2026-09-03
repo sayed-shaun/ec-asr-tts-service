@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     LITSERVE_TIMEOUT: float = 120.0
 
-    ITN_ENABLED: bool = True
+    ITN_ENABLED: bool = False
 
     GATEWAY_PORT: int = 8000
     LITSERVE_BASE_URL: str = "http://litserver:8000"
