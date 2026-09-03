@@ -17,11 +17,21 @@ services:
     volumes:
       - hf-cache:/opt/cache/huggingface
     healthcheck:
+      # LitServe answers /health with 503 until every worker finishes setup(),
+      # and a cold start downloads the checkpoints into the hf-cache volume --
+      # ~2.6GB for TTS alone, so first boot can run tens of minutes on a slow
+      # link while later boots take seconds. start_period is the knob that
+      # covers it: failures inside it never count toward retries and never mark
+      # the container unhealthy, but the first success promotes it immediately,
+      # so a generous value costs nothing on a warm cache. The gateway waits on
+      # service_healthy below, so this is also what stops compose giving up on
+      # the gateway mid-download. A litserver that dies outright still fails
+      # fast -- compose reports the exit, it doesn't wait this out.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 5s
+      interval: 10s
       timeout: 3s
-      retries: 60
-      start_period: 180s
+      retries: 30
+      start_period: 3600s
     deploy:
       resources:
         reservations:
