@@ -8,10 +8,7 @@ configured = False
 
 
 def configure_logging() -> None:
-    """Configure loguru sinks.
-
-    Safe to call multiple times (no-op after the first).
-    """
+    """Configure loguru sinks. No-op after the first call."""
     global configured
     if configured:
         return

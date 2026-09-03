@@ -1,3 +1,4 @@
+import base64
 import time
 
 import litserve as ls
@@ -5,35 +6,27 @@ from fastapi import HTTPException, status
 from loguru import logger
 
 from src.api.v1.asr.schema import AsrRequest, AsrResponse, Output
+from src.api.v1.tts.schema import TtsRequest, TtsResponse
 from src.core.config import settings
-from src.litserver.engine.base import BaseEngine
-from src.litserver.engine.conformer import ConformerEngine
-from src.litserver.engine.wav2vec2 import Wav2Vec2Engine
-from src.litserver.engine.whisper import WhisperEngine
-from src.litserver.engine.zipformer import ZipformerEngine
-from src.utils.audio import decode_base64_audio, warm_audio_decoder
-from src.utils.bn_text_repair import repair_stray_vowel_signs
+from src.litserver.base import BaseASREngine, BaseTTSEngine
+from src.litserver.parler import engine as parler
+from src.litserver.zipformer import engine as zipformer
+from src.utils.audio import decode_base64_audio, warm_audio_decoder, wav_bytes
 from src.utils.itn import bengali_numerals_to_digits
 
-# Bare numerals below this stay spelled out; measured sweep over the 1322-clip
-# FLEURS benchmark put the corpus-WER optimum here (0.1541 -> 0.1370, and
-# 0.2811 -> 0.1898 on digit-bearing references). See src/utils/itn.py.
+TTS_API_PATH = "/synthesize"
+
 ITN_MIN_VALUE = 10
+"""Bare numerals below this stay spelled out. Measured corpus-WER optimum over
+the 1322-clip FLEURS benchmark (0.1541 -> 0.1370; 0.2811 -> 0.1898 on
+digit-bearing references)."""
 
 
 class ASRLitAPI(ls.LitAPI):
-    """Serves Bengali ASR over HTTP via a pluggable engine (settings.ENGINE
-    selects ConformerEngine, Wav2Vec2Engine, WhisperEngine, or
-    ZipformerEngine).
-    """
+    """Serves Bengali ASR over HTTP via the Zipformer engine."""
 
     def setup(self, device: str) -> None:
-        """Load the model engine and warm the audio decoder.
-
-        The engine warms the model itself; warm_audio_decoder warms the
-        audio-decode half of the request path, which is the larger of the two
-        one-off costs.
-        """
+        """Load the model engine and warm the audio decoder."""
         self.engine = self.build_engine(device)
         self.engine.load(sample_rate=settings.SAMPLE_RATE)
 
@@ -44,27 +37,8 @@ class ASRLitAPI(ls.LitAPI):
             logger.warning(f"Audio decoder warmup failed (continuing anyway): {exc}")
 
     @staticmethod
-    def build_engine(device: str) -> BaseEngine:
-        if settings.ENGINE == "wav2vec2":
-            return Wav2Vec2Engine(
-                model_name=settings.WAV2VEC2_MODEL_NAME,
-                device=device,
-                max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
-            )
-        if settings.ENGINE == "whisper":
-            return WhisperEngine(
-                model_name=settings.WHISPER_MODEL_NAME,
-                device=device,
-                max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
-                load_in_8bit=settings.WHISPER_LOAD_IN_8BIT,
-            )
-        if settings.ENGINE == "zipformer":
-            return ZipformerEngine(model_name=settings.ZIPFORMER_MODEL_NAME)
-        return ConformerEngine(
-            model_name=settings.CONFORMER_MODEL_NAME,
-            device=device,
-            max_segment_seconds=settings.MAX_SEGMENT_SECONDS,
-        )
+    def build_engine(device: str) -> BaseASREngine:
+        return zipformer.build(device)
 
     def decode_request(self, request: AsrRequest) -> dict:
         sample_rate = request.config.samplingRate or settings.SAMPLE_RATE
@@ -94,15 +68,11 @@ class ASRLitAPI(ls.LitAPI):
     def encode_response(self, output: dict) -> AsrResponse:
         """Serialize transcripts, rewriting spelled-out numbers as digits.
 
-        Applied here rather than in the engine so the engine stays purely about
-        recognition, and so it lands after per-segment texts are joined — a
-        number split across a segment boundary would otherwise never be seen
-        as one numeral run.
+        ITN is a property of Bengali transcripts rather than of the model,
+        so it stays here; a quirk of the checkpoint belongs to its package.
         """
         time_taken = time.time() - output["received_at"]
         texts = output["transcriptions"]
-        if settings.ENGINE == "wav2vec2":
-            texts = [repair_stray_vowel_signs(text) for text in texts]
         if settings.ITN_ENABLED:
             texts = [
                 bengali_numerals_to_digits(text, min_value=ITN_MIN_VALUE)
@@ -111,4 +81,54 @@ class ASRLitAPI(ls.LitAPI):
         return AsrResponse(
             output=[Output(source=text) for text in texts],
             time_taken=time_taken,
+        )
+
+
+class TTSLitAPI(ls.LitAPI):
+    """Serves Bengali text-to-speech over HTTP.
+
+    Runs in the same LitServe process as ASRLitAPI, on its own api_path and
+    workers but sharing accelerator/devices/workers_per_device, so both
+    checkpoints are resident on the same GPU. TTS_ENABLED=false drops it.
+    """
+
+    def setup(self, device: str) -> None:
+        self.engine = self.build_engine(device)
+        self.engine.load()
+
+    @staticmethod
+    def build_engine(device: str) -> BaseTTSEngine:
+        return parler.build(device)
+
+    def decode_request(self, request: TtsRequest) -> dict:
+        return {
+            "text": request.input,
+            "voice": request.voice or settings.TTS_VOICE,
+            "description": request.description,
+            "received_at": time.time(),
+        }
+
+    def predict(self, x: dict) -> dict:
+        """Hand the whole request to the engine.
+
+        Whether that needs splitting into clauses is the engine's business
+        (see BaseTTSEngine.speak), so nothing here is model-specific.
+        """
+        try:
+            audio = self.engine.speak(x["text"], x["voice"], x["description"])
+        except ValueError as exc:
+            logger.warning(f"TTS request rejected: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            ) from exc
+        return {"audio": audio, "voice": x["voice"], "received_at": x["received_at"]}
+
+    def encode_response(self, output: dict) -> TtsResponse:
+        audio = output["audio"]
+        wav = wav_bytes(audio.samples, audio.sample_rate)
+        return TtsResponse(
+            audioContent=base64.b64encode(wav).decode("utf-8"),
+            sampleRate=audio.sample_rate,
+            voice=output["voice"],
+            time_taken=time.time() - output["received_at"],
         )

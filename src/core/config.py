@@ -8,48 +8,47 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    ENGINE: Literal["conformer", "wav2vec2", "whisper", "zipformer"] = "conformer"
-    CONFORMER_MODEL_NAME: str = "bengaliAI/BanglaConformer"
-    WAV2VEC2_MODEL_NAME: str = "SayedShaun/bangla-wave2vec2-unigram"
-    WHISPER_MODEL_NAME: str = "bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium"
-    WHISPER_LOAD_IN_8BIT: bool = False
     ZIPFORMER_MODEL_NAME: str = "alphacep/vosk-model-small-streaming-bn"
+    ZIPFORMER_PROVIDER: Literal["cpu", "cuda"] = "cpu"
+
+    TTS_ENABLED: bool = True
+    TTS_MODEL_NAME: str = "ai4bharat/indic-parler-tts"
+    TTS_VOICE: str = "Aditi"
+    TTS_MAX_CHARS: int = 160
+
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     DEVICES: Union[int, Literal["auto"]] = 1
 
     WORKERS_PER_DEVICE: int = 1
     TRANSCRIBE_BATCH_SIZE: int = 4
     SAMPLE_RATE: int = 16000
-    MAX_SEGMENT_SECONDS: float = 8.0
 
     LITSERVE_TIMEOUT: float = 120.0
 
     ITN_ENABLED: bool = True
 
     GATEWAY_PORT: int = 8000
+    LITSERVE_BASE_URL: str = "http://litserver:8000"
+    LITSERVE_PORT: int = 8000
+    CORS_ALLOW_ORIGINS: str = "*"
 
-    LIVE_CC_CHUNK_SECONDS: float = 3.0
-    LIVE_CC_INTERIM_INTERVAL_SECONDS: float = 1.0
-    LIVE_CC_INPUT_SAMPLE_RATE: int = 16000
+    VOICEBOT_PORT: int = 8100
+    VOICEBOT_PCM_FRAME_MS: int = 100
+    VOICEBOT_INPUT_SAMPLE_RATE: int = 16000
+
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
 
     @property
     def ACTIVE_MODEL_NAME(self) -> str:
-        """Whichever checkpoint settings.ENGINE will actually load."""
-        if self.ENGINE == "wav2vec2":
-            return self.WAV2VEC2_MODEL_NAME
-        if self.ENGINE == "whisper":
-            return self.WHISPER_MODEL_NAME
-        if self.ENGINE == "zipformer":
-            return self.ZIPFORMER_MODEL_NAME
-        if self.ENGINE == "conformer":
-            return self.CONFORMER_MODEL_NAME
-        raise ValueError(
-            f"Unknown engine: {self.ENGINE}", 
-            "must be one of conformer, wav2vec2, whisper, zipformer"
-        )
+        """The ASR checkpoint the server will load."""
+        return self.ZIPFORMER_MODEL_NAME
+
+    @property
+    def ACTIVE_TTS_MODEL_NAME(self) -> str | None:
+        """Whichever TTS checkpoint the server will load, None when disabled."""
+        return self.TTS_MODEL_NAME if self.TTS_ENABLED else None
 
 
 settings = Settings()

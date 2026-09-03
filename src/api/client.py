@@ -1,29 +1,49 @@
 """Communication layer between the FastAPI gateway and the LitServe service.
 
-Centralizes the base URL and the /predict call the gateway makes into
-LitServe so both asr/router.py and live_cc/router.py share one place
-instead of each building its own litserve_base_url/httpx.AsyncClient.
-Callers still own the client's lifetime
-(`async with get_litserve_client() as client: ...`) so a long-lived
-connection (e.g. a live-cc websocket) can reuse one client across many
-calls, same as before this existed.
+Centralizes the base URL, the calls into LitServe (/predict for ASR,
+/synthesize for TTS) and the error translation around them. Callers own the
+client's lifetime (`async with get_litserve_client() as client: ...`) so a
+long-lived connection can reuse one client across many calls.
 """
 
+from typing import Awaitable
+
 import httpx
+from fastapi import HTTPException, status
 
 from src.core.config import settings
 
-LITSERVE_BASE_URL = "http://litserver:8000"
+LITSERVE_BASE_URL = settings.LITSERVE_BASE_URL
+"""Where the model server lives. Defaults to the compose service name, so it
+only resolves inside that network; deployments that split the two need it
+set explicitly."""
 PREDICT_PATH = "/predict"
+SYNTHESIZE_PATH = "/synthesize"
 
-# Must stay above settings.LITSERVE_TIMEOUT: LitServe's own queue timeout
-# should be what returns a 504 to the client, not this connection aborting
-# first and racing it.
 DEFAULT_TIMEOUT = settings.LITSERVE_TIMEOUT + 10
+"""Must stay above settings.LITSERVE_TIMEOUT so LitServe's own queue timeout
+returns the 504, rather than this connection aborting first and racing it."""
 
 
 def get_litserve_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=LITSERVE_BASE_URL)
+
+
+async def forward_to_litserve(call: Awaitable[httpx.Response]) -> httpx.Response:
+    """Await a litserve call, turning connection failures into distinguishable
+    HTTP errors (502 unreachable, 504 no response in time) instead of a 500.
+    """
+    try:
+        return await call
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="LitServe request timed out",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="LitServe is unreachable"
+        ) from exc
 
 
 async def transcribe(
@@ -31,12 +51,8 @@ async def transcribe(
 ) -> httpx.Response:
     """POST base64 audio to LitServe's /predict, return the raw response.
 
-    Deliberately does not call raise_for_status() or parse the body: callers
-    want different things from it (asr/router.py passes both the JSON body
-    *and* status code straight through to its own caller; live_cc/router.py
-    just tries to pull output[].source and tolerates a malformed/error body
-    by defaulting to empty text) — that policy stays theirs, not this
-    module's.
+    Deliberately neither raises for status nor parses the body: callers want
+    different things from it, so that policy stays theirs.
     """
     payload = {
         "config": {"language": {"sourceLanguage": "bn"}},
@@ -48,12 +64,20 @@ async def transcribe(
 async def transcribe_request(
     client: httpx.AsyncClient, payload: dict, timeout: float = DEFAULT_TIMEOUT
 ) -> httpx.Response:
-    """POST an already-built AsrRequest-shaped payload straight through to
-    LitServe's /predict.
+    """POST an already-validated AsrRequest-shaped payload to /predict.
 
-    For callers that already have a full request body validated (e.g. the
-    raw JSON /transcribe route, which may carry multiple audio items or a
-    non-default config) rather than a single audio_content string — see
-    transcribe() above for that narrower case.
+    For callers holding a full request body (multiple audio items, a
+    non-default config) rather than one audio_content string.
     """
     return await client.post(PREDICT_PATH, json=payload, timeout=timeout)
+
+
+async def synthesize(
+    client: httpx.AsyncClient, payload: dict, timeout: float = DEFAULT_TIMEOUT
+) -> httpx.Response:
+    """POST an already-validated TtsRequest-shaped payload to /synthesize.
+
+    That is the second LitAPI in the same model server, not a second service.
+    Response is passed back unhandled, as in transcribe() above.
+    """
+    return await client.post(SYNTHESIZE_PATH, json=payload, timeout=timeout)

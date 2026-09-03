@@ -1,32 +1,43 @@
 import base64
 import io
+import json
+import pathlib
 import shutil
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
 import numpy as np
 import pytest
-import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from loguru import logger
 from pydantic import ValidationError
 
 from main import create_gateway_app
-from src.api.client import PREDICT_PATH
+from src.api.client import PREDICT_PATH, SYNTHESIZE_PATH
+from src.api.v1.asr.router import compat_router as asr_compat_router
+from src.api.v1.asr.router import openai_router as asr_openai_router
 from src.api.v1.asr.router import router as asr_router
 from src.api.v1.asr.schema import AsrRequest
-from src.api.v1.live_cc.router import router as live_cc_router
+from src.api.v1.tts.router import openai_router as tts_openai_router
+from src.api.v1.tts.router import router as tts_router
+from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
-from src.litserver.engine.conformer import ConformerEngine
-from src.litserver.engine.whisper import WhisperEngine
-from src.litserver.litapi import ASRLitAPI
+from src.litserver.base import Audio, BaseTTSEngine
+from src.litserver.litapi import TTS_API_PATH, ASRLitAPI, TTSLitAPI
+from src.litserver.parler.chunking import IncrementalTextChunker, chunk_text
+from src.litserver.parler.voices import VOICES as TTS_VOICES
+from src.litserver.zipformer.engine import ZipformerEngine
+from src.litserver.zipformer.layouts import DEFAULT, K2_FSA, VOSK_BN
 from src.utils.audio import decode_base64_audio
-from src.utils.bn_text_repair import repair_stray_vowel_signs
 from src.utils.itn import bengali_numerals_to_digits as itn
+from src.voicebot import app as voicebot_app
+from src.voicebot.app import pcm_to_float32
 
 
 def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
@@ -56,10 +67,8 @@ def test_info_endpoint(info_client):
 
 @pytest.fixture
 def asr_client(monkeypatch):
-    """asr_router forwards to LitServe over a real HTTP client (see
-    src/api/client.py); the fake predict endpoint below lives on a separate
-    app, and the client's httpx.AsyncClient is monkeypatched to reach it
-    in-process instead of opening a real socket, keeping the test hermetic.
+    """A fake /predict on a separate app, reached in-process by monkeypatching
+    the client's httpx.AsyncClient so no real socket opens.
     """
     predict_app = FastAPI()
 
@@ -83,6 +92,8 @@ def asr_client(monkeypatch):
 
     app = FastAPI()
     app.include_router(asr_router)
+    app.include_router(asr_openai_router)
+    app.include_router(asr_compat_router)
     return TestClient(app)
 
 
@@ -115,10 +126,8 @@ def test_decode_base64_audio_rejects_garbage():
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
 def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
-    """Regression test: librosa can't decode compressed containers (webm/opus,
-    what MediaRecorder produces in browsers) from an in-memory BytesIO —
-    soundfile doesn't support the format at all, and its audioread/ffmpeg
-    fallback needs a real file path, not a stream.
+    """Regression test: webm/opus needs the ffmpeg fallback's real file path,
+    which an in-memory BytesIO can't provide.
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         webm_path = Path(tmp_dir) / "test.webm"
@@ -150,99 +159,38 @@ def test_decode_base64_audio_handles_webm_opus_and_cleans_up_temp_file():
 
 def test_is_non_speech_flags_sparse_hallucinations():
     """Outputs actually observed from silence, noise, tone and music."""
-    assert ConformerEngine.is_non_speech("তেন", 5.0)
-    assert ConformerEngine.is_non_speech("ত", 3.0)
-    assert ConformerEngine.is_non_speech("সগগগগগগ্গগ্গেন", 5.0)
-    assert ConformerEngine.is_non_speech("স", 15.0)
+    assert ZipformerEngine.is_non_speech("তেন", 5.0)
+    assert ZipformerEngine.is_non_speech("ত", 3.0)
+    assert ZipformerEngine.is_non_speech("সগগগগগগ্গগ্গেন", 5.0)
+    assert ZipformerEngine.is_non_speech("স", 15.0)
 
 
 def test_is_non_speech_keeps_real_speech():
     """Real FLEURS speech never fell below 4.46 chars/sec over 1322 clips."""
     sentence = "জার্মানির অনেক বেক করা খাবারগুলিতে বাদাম পাওয়া যায়"
-    assert not ConformerEngine.is_non_speech(sentence, 8.0)
-    # A short utterance in a short segment is dense enough to keep.
-    assert not ConformerEngine.is_non_speech("হ্যালো", 1.0)
+    assert not ZipformerEngine.is_non_speech(sentence, 8.0)
+    assert not ZipformerEngine.is_non_speech("হ্যালো", 1.0)
 
 
 def test_is_non_speech_absolute_cap_protects_short_real_phrases():
-    """A brief real phrase in a long quiet segment is sparse, but exceeding the
-    character cap keeps it — only tiny *and* sparse output is discarded.
-    """
-    phrase = "আমি তোমাকে বলেছি ভাই"  # > NON_SPEECH_MAX_CHARS
+    """Only output that is both tiny and sparse is discarded."""
+    phrase = "আমি তোমাকে বলেছি ভাই"
     assert len("".join(phrase.split())) > 15
-    assert not ConformerEngine.is_non_speech(phrase, 18.0)
+    assert not ZipformerEngine.is_non_speech(phrase, 18.0)
 
 
 def test_is_non_speech_ignores_empty_and_bad_duration():
-    assert not ConformerEngine.is_non_speech("", 5.0)
-    assert not ConformerEngine.is_non_speech("   ", 5.0)
-    assert not ConformerEngine.is_non_speech("তেন", 0.0)
+    assert not ZipformerEngine.is_non_speech("", 5.0)
+    assert not ZipformerEngine.is_non_speech("   ", 5.0)
+    assert not ZipformerEngine.is_non_speech("তেন", 0.0)
 
 
 def test_is_non_speech_flags_literal_hallucination_on_short_segments():
-    """This repo's Whisper checkpoint decodes silence to the literal "<>" --
-    on a short segment its density is too high to trip the sparse-output
-    heuristic (2 chars over 0.5s exceeds NON_SPEECH_MIN_CHAR_DENSITY), so it
-    must be caught as a known literal instead.
+    """"<>" is too dense on a short segment to trip the sparse-output
+    heuristic, so it must be caught as a known literal.
     """
-    assert ConformerEngine.is_non_speech("<>", 0.5)
-    assert ConformerEngine.is_non_speech("<>", 5.0)
-
-
-def test_transcribe_drops_non_speech_segment_but_keeps_speech():
-    """The reported symptom: a music/silence tail became its own segment and
-    appended a stray character to an otherwise-correct transcript.
-    """
-    sr = 16000
-    engine = ConformerEngine(model_name="dummy", device="cpu", max_segment_seconds=18.0)
-    engine.model = MagicMock()
-    engine.model.transcribe.return_value = [
-        "আমি ভাত খেয়ে বাড়িতে চলে গিয়েছিলাম আজকে সকালে",
-        "ত",
-    ]
-
-    audio = np.zeros(int(sr * 30), dtype=np.float32)
-    result = engine.transcribe([audio], batch_size=2, sample_rate=sr)
-
-    assert result == ["আমি ভাত খেয়ে বাড়িতে চলে গিয়েছিলাম আজকে সকালে"]
-    assert not result[0].endswith("ত ")
-
-
-def test_whisper_engine_drops_non_speech_hallucination():
-    """Regression: this repo's Whisper checkpoint decodes pure silence to the
-    literal string "<>", which then popped up repeatedly in live captions
-    since WhisperEngine (unlike ConformerEngine) never filtered it.
-    """
-    sr = 16000
-    engine = WhisperEngine(model_name="dummy", device="cpu", max_segment_seconds=28.0)
-    engine.processor = MagicMock()
-    engine.processor.return_value.input_features = torch.zeros(1, 1, 1)
-    engine.processor.batch_decode.return_value = ["<>"]
-    engine.model = MagicMock()
-    engine.model.generate.return_value = torch.zeros(1, 1, dtype=torch.long)
-    engine.decoder_input_ids = torch.zeros(1, 1, dtype=torch.long)
-
-    audio = np.zeros(int(sr * 3), dtype=np.float32)
-    result = engine.transcribe([audio], batch_size=1, sample_rate=sr)
-
-    assert result == [""]
-
-
-def test_transcribe_non_speech_drop_can_be_disabled():
-    sr = 16000
-    engine = ConformerEngine(
-        model_name="dummy",
-        device="cpu",
-        max_segment_seconds=18.0,
-        drop_non_speech=False,
-    )
-    engine.model = MagicMock()
-    engine.model.transcribe.return_value = ["আজকে আমি বাড়িতে গিয়েছিলাম", "ত"]
-
-    audio = np.zeros(int(sr * 30), dtype=np.float32)
-    result = engine.transcribe([audio], batch_size=2, sample_rate=sr)
-
-    assert result[0].endswith("ত")
+    assert ZipformerEngine.is_non_speech("<>", 0.5)
+    assert ZipformerEngine.is_non_speech("<>", 5.0)
 
 
 def test_itn_converts_compound_hundreds_and_decimals():
@@ -263,7 +211,6 @@ def test_itn_leaves_small_bare_numerals_spelled_out():
     """
     assert itn("এক ব্যক্তি হাঁটছিলেন") == "এক ব্যক্তি হাঁটছিলেন"
     assert itn("দুই") == "দুই"
-    # ...but a scale word means it reads as a real quantity.
     assert itn("দুই হাজার") == "2000"
 
 
@@ -326,33 +273,6 @@ def lit_api():
     return api
 
 
-def test_repair_stray_vowel_signs_reattaches_floating_matra():
-    """Regression: wav2vec2 CTC decoding sometimes emits a dependent vowel
-    sign as its own space-separated "word" instead of attached to the
-    preceding consonant.
-    """
-    assert repair_stray_vowel_signs("কাছ েেে কিছুই") == "কাছে কিছুই"
-    assert repair_stray_vowel_signs("স্পা ে প্রাচীর") == "স্পাে প্রাচীর"
-
-
-def test_repair_stray_vowel_signs_leaves_normal_text_unchanged():
-    for text in ("আজকে আমি বাড়িতে গিয়েছিলাম", "", "   "):
-        assert repair_stray_vowel_signs(text) == text
-
-
-def test_lit_api_applies_vowel_repair_only_for_wav2vec2(lit_api, monkeypatch):
-    monkeypatch.setattr(settings, "ENGINE", "wav2vec2")
-    monkeypatch.setattr(settings, "ITN_ENABLED", False)
-    lit_api.engine.transcribe.return_value = ["কাছ েেে কিছুই"]
-    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
-    prediction = lit_api.predict(lit_api.decode_request(request))
-    assert lit_api.encode_response(prediction).output[0].source == "কাছে কিছুই"
-
-    monkeypatch.setattr(settings, "ENGINE", "conformer")
-    prediction = lit_api.predict(lit_api.decode_request(request))
-    assert lit_api.encode_response(prediction).output[0].source == "কাছ েেে কিছুই"
-
-
 def test_lit_api_full_cycle(lit_api):
     request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
     decoded = lit_api.decode_request(request)
@@ -367,218 +287,677 @@ def test_lit_api_full_cycle(lit_api):
     assert response.time_taken >= 0
 
 
-def test_asr_engine_splits_long_audio_into_segments():
-    # drop_non_speech off: the one-character stub transcripts below are far too
-    # sparse to pass the non-speech gate, and this test is about splitting.
-    engine = ConformerEngine(
-        model_name="dummy",
-        device="cpu",
-        max_segment_seconds=1.0,
-        drop_non_speech=False,
-    )
-    engine.model = MagicMock()
-    engine.model.transcribe.return_value = ["a", "b", "c"]
+class FakeTTSEngine(BaseTTSEngine):
+    """Records what it was asked to say and returns one flat second of audio
+    per call. Subclasses the real contract so it inherits speak()/join()
+    rather than reimplementing them."""
 
-    sr = 16000
-    audio = np.zeros(int(sr * 2.5), dtype=np.float32)
-    result = engine.transcribe([audio], batch_size=4, sample_rate=sr)
+    voices = TTS_VOICES
 
-    assert result == ["a b c"]
-    assert len(engine.model.transcribe.call_args.kwargs["audio"]) == 3
+    def __init__(self, sample_rate: int = 44100):
+        self.sample_rate = sample_rate
+        self.calls = []
 
+    def load(self) -> None:
+        pass
 
-def test_asr_engine_leaves_short_audio_unsplit():
-    # See above: stub transcript is too short for the non-speech gate.
-    engine = ConformerEngine(
-        model_name="dummy",
-        device="cpu",
-        max_segment_seconds=18.0,
-        drop_non_speech=False,
-    )
-    engine.model = MagicMock()
-    engine.model.transcribe.return_value = ["hello"]
-
-    sr = 16000
-    audio = np.zeros(int(sr * 2.0), dtype=np.float32)
-    result = engine.transcribe([audio], batch_size=4, sample_rate=sr)
-
-    assert result == ["hello"]
-    assert len(engine.model.transcribe.call_args.kwargs["audio"]) == 1
+    def synthesize(self, text, voice="", description=None):
+        voice = voice or "Aditi"
+        if voice not in self.voices:
+            raise ValueError(f"unknown voice: {voice}")
+        if not text.strip():
+            raise ValueError("text must not be empty")
+        self.calls.append((text, voice, description))
+        return Audio(np.full(self.sample_rate, 0.5, dtype=np.float32), self.sample_rate)
 
 
-def test_asr_engine_respects_custom_sample_rate_for_segment_length():
-    """max_segment_seconds is interpreted against the request's sample rate,
-    not a hardcoded 16kHz. Exact boundaries depend on where split() finds a
-    quiet point, so this asserts the length ceiling rather than a fixed count.
-    """
-    engine = ConformerEngine(model_name="dummy", device="cpu", max_segment_seconds=1.0)
-    engine.model = MagicMock()
-    engine.model.transcribe.side_effect = lambda audio, **kw: [
-        f"s{i}" for i in range(len(audio))
-    ]
+class ChunkingFakeTTSEngine(FakeTTSEngine):
+    """A fake that splits like Parler does, for the chunk-and-join path."""
 
-    audio = np.zeros(8000 * 2, dtype=np.float32)
-    engine.transcribe([audio], batch_size=4, sample_rate=8000)
+    max_chars = 160
 
-    segments = engine.model.transcribe.call_args.kwargs["audio"]
-    assert len(segments) > 1
-    assert all(len(seg) <= 8000 for seg in segments)
-    assert sum(len(seg) for seg in segments) == audio.size
-
-
-def test_asr_engine_split_prefers_quiet_cut_points():
-    """A hard cut landing mid-word truncates it in both neighbouring segments
-    and CTC tends to drop it entirely. Boundaries must land in the pauses.
-    """
-    sr = 16000
-    # 1s of tone, then 0.5s of silence, repeating.
-    block = np.concatenate(
-        [
-            np.sin(2 * np.pi * 220 * np.arange(sr) / sr).astype(np.float32),
-            np.zeros(sr // 2, dtype=np.float32),
-        ]
-    )
-    audio = np.tile(block, 40)
-
-    segments = ConformerEngine.split(audio, sr * 18, sr * 2)
-
-    period = sr + sr // 2
-    boundaries = np.cumsum([len(s) for s in segments])[:-1]
-    assert len(boundaries) > 0
-    # phase >= sr means the boundary sits in a silent gap, not in the tone.
-    assert all(b % period >= sr for b in boundaries)
-
-
-def test_asr_engine_split_is_lossless_and_bounded():
-    sr = 16000
-    audio = np.random.RandomState(0).randn(sr * 87).astype(np.float32)
-
-    segments = ConformerEngine.split(audio, sr * 18, sr * 2)
-
-    assert np.array_equal(np.concatenate(segments), audio)
-    assert all(len(s) <= sr * 18 for s in segments)
-
-
-def test_asr_engine_split_without_search_uses_fixed_cuts():
-    """boundary_search_samples=0 must reproduce plain fixed-size slicing."""
-    sr = 16000
-    audio = np.random.RandomState(0).randn(sr * 50).astype(np.float32)
-    max_samples = sr * 18
-
-    segments = ConformerEngine.split(audio, max_samples, 0)
-    expected = [
-        audio[i : i + max_samples] for i in range(0, audio.size, max_samples)
-    ]
-
-    assert len(segments) == len(expected)
-    assert all(np.array_equal(a, b) for a, b in zip(segments, expected))
-
-
-def test_asr_engine_split_keeps_segments_long_on_flat_audio():
-    """Flat-energy audio ties on every frame; the cut must stay at the far end
-    of the search window rather than always jumping to its start.
-    """
-    sr = 16000
-    audio = np.zeros(sr * 50, dtype=np.float32)
-
-    segments = ConformerEngine.split(audio, sr * 18, sr * 2)
-
-    assert len(segments[0]) > sr * 17
+    def speak_stream(self, text, voice="", description=None):
+        for chunk in chunk_text(text, max_chars=self.max_chars):
+            yield self.synthesize(chunk, voice, description)
 
 
 @pytest.fixture
-def live_cc_client(monkeypatch):
-    """live_cc_router now calls the LitServe model server over a real HTTP
-    client (see router.py) rather than an in-process ASGI transport, so the
-    fake predict endpoint below lives on a separate app; the router's
-    httpx.AsyncClient is monkeypatched to reach it in-process instead of
-    opening a real socket, keeping the test hermetic.
-    """
-    predict_app = FastAPI()
+def tts_lit_api():
+    api = TTSLitAPI(max_batch_size=1, api_path=TTS_API_PATH)
+    api.engine = FakeTTSEngine()
+    return api
 
-    @predict_app.post(PREDICT_PATH)
-    async def fake_predict(payload: dict) -> dict:
+
+def test_tts_lit_api_full_cycle(tts_lit_api):
+    request = TtsRequest(input="আমি ভালো আছি।")
+    response = tts_lit_api.encode_response(
+        tts_lit_api.predict(tts_lit_api.decode_request(request))
+    )
+    assert response.taskType == "tts"
+    assert response.sampleRate == 44100
+    assert response.voice == settings.TTS_VOICE
+
+    wav = base64.b64decode(response.audioContent)
+    with wave.open(io.BytesIO(wav), "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        assert wf.getframerate() == 44100
+        assert wf.getnframes() == 44100
+
+
+def test_tts_lit_api_hands_the_whole_request_to_the_engine(tts_lit_api):
+    """Splitting is the engine's business now, so a plain engine sees the text
+    whole and the LitAPI stays model-agnostic."""
+    text = "এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।"
+    tts_lit_api.predict(tts_lit_api.decode_request(TtsRequest(input=text)))
+    assert [call[0] for call in tts_lit_api.engine.calls] == [text]
+
+
+def test_chunking_engine_splits_and_joins_with_gaps():
+    """The Parler-shaped path: speak() splits on clause boundaries, synthesizes
+    each and joins with a gap between parts but not around them."""
+    api = TTSLitAPI(max_batch_size=1, api_path=TTS_API_PATH)
+    api.engine = ChunkingFakeTTSEngine()
+    text = "এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।"
+    output = api.predict(api.decode_request(TtsRequest(input=text)))
+
+    assert len(api.engine.calls) == 3
+    expected = 3 * 44100 + 2 * round(0.08 * 44100)
+    assert output["audio"].samples.size == expected
+
+
+def test_tts_lit_api_passes_voice_and_description_through(tts_lit_api):
+    request = TtsRequest(input="পরীক্ষা।", voice="Arjun", description="  slow and calm  ")
+    tts_lit_api.predict(tts_lit_api.decode_request(request))
+    assert tts_lit_api.engine.calls == [("পরীক্ষা।", "Arjun", "  slow and calm  ")]
+
+
+def test_tts_lit_api_unknown_voice_is_422_not_500(tts_lit_api):
+    decoded = tts_lit_api.decode_request(TtsRequest(input="পরীক্ষা।"))
+    decoded["voice"] = "Nobody"
+    with pytest.raises(HTTPException) as excinfo:
+        tts_lit_api.predict(decoded)
+    assert excinfo.value.status_code == 422
+
+
+def test_tts_request_rejects_blank_input():
+    with pytest.raises(ValidationError):
+        TtsRequest(input="   ")
+
+
+def test_tts_engine_join_rejects_mixed_sample_rates():
+    parts = [
+        Audio(np.zeros(4, dtype=np.float32), 44100),
+        Audio(np.zeros(4, dtype=np.float32), 16000),
+    ]
+    with pytest.raises(ValueError):
+        BaseTTSEngine.join(parts)
+
+
+def test_audio_pcm_clips_instead_of_wrapping():
+    """Without the clip, a sample above 1.0 overflows int16 into a loud
+    negative: an audible pop rather than clean saturation."""
+    pcm = Audio(np.array([2.0, -2.0], dtype=np.float32), 16000).pcm_s16le()
+    assert np.frombuffer(pcm, dtype="<i2").tolist() == [32767, -32767]
+
+
+def test_chunker_hard_splits_text_with_no_punctuation():
+    long_text = " ".join(["শব্দ"] * 200)
+    chunks = chunk_text(long_text, max_chars=80)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 80 for chunk in chunks)
+    assert "".join(chunks.copy()).replace(" ", "") == long_text.replace(" ", "")
+
+
+def test_chunker_holds_incomplete_clause_until_flush():
+    chunker = IncrementalTextChunker(max_chars=160)
+    assert chunker.feed("আমি ভালো") == []
+    assert chunker.feed(" আছি।") == ["আমি ভালো আছি।"]
+    assert chunker.feed("বাকি অংশ") == []
+    assert chunker.flush() == ["বাকি অংশ"]
+
+
+@pytest.fixture
+def tts_client(monkeypatch):
+    """A fake LitServe /synthesize, wired in through the shared client."""
+    fake = FastAPI()
+
+    @fake.post(SYNTHESIZE_PATH)
+    async def synthesize(payload: dict) -> dict:
+        silence = np.zeros(1000, dtype=np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(44100)
+            wf.writeframes(silence.tobytes())
         return {
-            "taskType": "asr",
-            "output": [{"source": "হ্যালো"}],
+            "taskType": "tts",
+            "audioContent": base64.b64encode(buf.getvalue()).decode("utf-8"),
+            "sampleRate": 44100,
+            "voice": payload.get("voice") or "Aditi",
             "time_taken": 0.1,
         }
 
-    real_async_client = httpx.AsyncClient
-
-    def fake_async_client(*args, **kwargs):
-        return real_async_client(
-            transport=httpx.ASGITransport(app=predict_app),
-            base_url="http://internal",
-        )
-
+    transport = httpx.ASGITransport(app=fake)
     monkeypatch.setattr(
-        "src.api.v1.live_cc.router.httpx.AsyncClient", fake_async_client
+        "src.api.client.get_litserve_client",
+        lambda: httpx.AsyncClient(transport=transport, base_url="http://litserver:8000"),
     )
-
     app = FastAPI()
-    app.include_router(live_cc_router)
+    app.include_router(tts_router)
+    app.include_router(tts_openai_router)
     return TestClient(app)
 
 
-def test_live_cc_ws_emits_caption_per_chunk(live_cc_client):
-    chunk_samples = int(
-        settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS
+def test_tts_synthesize_endpoint_returns_base64_wav(tts_client):
+    resp = tts_client.post("/api/v1/tts/synthesize", json={"input": "হ্যালো"})
+    assert resp.status_code == 200
+    assert resp.json()["sampleRate"] == 44100
+
+
+def test_tts_synthesize_audio_endpoint_returns_playable_wav(tts_client):
+    resp = tts_client.post("/api/v1/tts/synthesize/audio", json={"input": "হ্যালো"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
+    with wave.open(io.BytesIO(resp.content), "rb") as wf:
+        assert wf.getframerate() == 44100
+
+
+def test_tts_synthesize_rejects_unknown_voice_before_hitting_the_model(tts_client):
+    resp = tts_client.post(
+        "/api/v1/tts/synthesize", json={"input": "হ্যালো", "voice": "Nobody"}
     )
-    pcm = np.zeros(chunk_samples, dtype=np.int16).tobytes()
-
-    with live_cc_client.websocket_connect("/api/v1/live-cc/ws") as ws:
-        ws.send_bytes(pcm)
-        message = ws.receive_json()
-
-    assert message == {"text": "হ্যালো", "is_final": True}
+    assert resp.status_code == 422
 
 
-def test_live_cc_ws_buffers_partial_chunks(live_cc_client):
-    """Half a chunk (1.5s) already crosses one interim step (1.0s), so the
-    first half triggers an interim caption before the second half finalizes it.
-    """
-    chunk_samples = int(
-        settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_CHUNK_SECONDS
+def test_tts_voices_endpoint_lists_default(tts_client):
+    body = tts_client.get("/api/v1/tts/voices").json()
+    assert body["default"] == settings.TTS_VOICE
+    assert set(body["voices"]) == set(TTS_VOICES)
+
+
+def test_tts_routes_return_503_when_disabled(tts_client, monkeypatch):
+    monkeypatch.setattr(settings, "TTS_ENABLED", False)
+    resp = tts_client.post("/api/v1/tts/synthesize", json={"input": "হ্যালো"})
+    assert resp.status_code == 503
+    assert tts_client.get("/api/v1/tts/info").json()["model"] is None
+
+
+def _capture_zipformer_load(monkeypatch):
+    """Record what ZipformerEngine.load() asks the Hub for, without network or
+    a real recognizer. Returns (requested, recognizer_kwargs), both filled in
+    once load() runs."""
+    requested = []
+    recognizer_kwargs = {}
+
+    def fake_download(repo, filename):
+        requested.append((repo, filename))
+        return f"/fake/{filename}"
+
+    def fake_from_transducer(**kwargs):
+        recognizer_kwargs.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "src.litserver.zipformer.engine.hf_hub_download", fake_download
     )
-    half_pcm = np.zeros(chunk_samples // 2, dtype=np.int16).tobytes()
-
-    with live_cc_client.websocket_connect("/api/v1/live-cc/ws") as ws:
-        ws.send_bytes(half_pcm)
-        interim = ws.receive_json()
-        ws.send_bytes(half_pcm)
-        final = ws.receive_json()
-
-    assert interim == {"text": "হ্যালো", "is_final": False}
-    assert final == {"text": "হ্যালো", "is_final": True}
-
-
-def test_live_cc_ws_emits_interim_captions_before_final(live_cc_client):
-    """Steps through interim intervals, then sends the remainder to cross the
-    final chunk boundary.
-    """
-    interim_samples = int(
-        settings.LIVE_CC_INPUT_SAMPLE_RATE * settings.LIVE_CC_INTERIM_INTERVAL_SECONDS
+    monkeypatch.setattr(
+        "sherpa_onnx.OnlineRecognizer.from_transducer",
+        staticmethod(fake_from_transducer),
     )
-    step_pcm = np.zeros(interim_samples, dtype=np.int16).tobytes()
+    return requested, recognizer_kwargs
 
-    chunk_seconds = settings.LIVE_CC_CHUNK_SECONDS
-    interim_seconds = settings.LIVE_CC_INTERIM_INTERVAL_SECONDS
-    num_interim_steps = int(chunk_seconds / interim_seconds) - 1
 
-    with live_cc_client.websocket_connect("/api/v1/live-cc/ws") as ws:
-        messages = []
-        for _ in range(num_interim_steps):
-            ws.send_bytes(step_pcm)
-            messages.append(ws.receive_json())
+def test_zipformer_engine_defaults_to_the_vosk_repo_layout(monkeypatch):
+    requested, recognizer_kwargs = _capture_zipformer_load(monkeypatch)
+    ZipformerEngine(model_name="alphacep/vosk-model-small-streaming-bn").load(
+        warmup_seconds=0
+    )
+    assert requested == [
+        ("alphacep/vosk-model-small-streaming-bn", "am-onnx/encoder.onnx"),
+        ("alphacep/vosk-model-small-streaming-bn", "am-onnx/decoder.onnx"),
+        ("alphacep/vosk-model-small-streaming-bn", "am-onnx/joiner.onnx"),
+        ("alphacep/vosk-model-small-streaming-bn", "lang/tokens.txt"),
+    ]
+    assert recognizer_kwargs["tokens"] == "/fake/lang/tokens.txt"
+    assert DEFAULT is VOSK_BN
 
-        remaining_samples = (
-            int(settings.LIVE_CC_INPUT_SAMPLE_RATE * chunk_seconds)
-            - interim_samples * num_interim_steps
-        )
-        ws.send_bytes(np.zeros(remaining_samples, dtype=np.int16).tobytes())
-        messages.append(ws.receive_json())
 
-    assert all(m["is_final"] is False for m in messages[:-1])
-    assert messages[-1]["is_final"] is True
+def test_zipformer_engine_downloads_the_layout_it_was_given(monkeypatch):
+    """A checkpoint with a different repo layout is served by passing another
+    descriptor from src/litserver/zipformer/layouts.py, with no engine change."""
+    requested, recognizer_kwargs = _capture_zipformer_load(monkeypatch)
+    ZipformerEngine(
+        model_name="k2-fsa/sherpa-onnx-streaming-zipformer-bilingual-zh-en",
+        layout=K2_FSA,
+    ).load(warmup_seconds=0)
 
+    assert [path for _, path in requested] == [
+        "encoder-epoch-99-avg-1.onnx",
+        "decoder-epoch-99-avg-1.onnx",
+        "joiner-epoch-99-avg-1.onnx",
+        "tokens.txt",
+    ]
+    assert recognizer_kwargs["encoder"] == "/fake/encoder-epoch-99-avg-1.onnx"
+    assert recognizer_kwargs["tokens"] == "/fake/tokens.txt"
+
+
+def test_zipformer_layouts_are_immutable():
+    """Layouts are shared module-level defaults; a mutable one would let a
+    single engine instance rewrite what every later instance downloads."""
+    with pytest.raises(Exception):
+        VOSK_BN.encoder = "somewhere/else.onnx"
+
+
+class FakeRecognizer:
+    """Stands in for sherpa_onnx.OnlineRecognizer, recording frames fed to the
+    one stream it hands out so session lifetime is observable."""
+
+    def __init__(self, transcripts):
+        self.transcripts = list(transcripts)
+        self.frames = []
+        self.resets = 0
+        self.endpoint = False
+        self.finished = False
+
+    def create_stream(self):
+        recognizer = self
+
+        class Stream:
+            def accept_waveform(self, sample_rate, samples):
+                recognizer.frames.append(len(samples))
+
+            def input_finished(self):
+                recognizer.finished = True
+
+        return Stream()
+
+    def is_ready(self, stream):
+        return False
+
+    def decode_stream(self, stream):
+        pass
+
+    def get_result(self, stream):
+        return self.transcripts[min(len(self.frames), len(self.transcripts)) - 1]
+
+    def is_endpoint(self, stream):
+        return self.endpoint
+
+    def reset(self, stream):
+        self.resets += 1
+        self.transcripts = [""]
+
+
+def _session(transcripts):
+    engine = ZipformerEngine(model_name="dummy")
+    engine.recognizer = FakeRecognizer(transcripts)
+    return engine.stream(), engine.recognizer
+
+
+def test_zipformer_stream_requires_load_first():
+    with pytest.raises(RuntimeError, match="load\\(\\) must be called"):
+        ZipformerEngine(model_name="dummy").stream()
+
+
+def test_zipformer_session_decodes_incrementally_on_one_stream():
+    """The point of a session: many frames, one stream — not one cold decode
+    of the whole buffer per frame."""
+    session, recognizer = _session(["আমি", "আমি ভালো", "আমি ভালো আছি"])
+    frame = np.zeros(1600, dtype=np.float32)
+
+    assert session.accept(frame) == "আমি"
+    assert session.accept(frame) == "আমি ভালো"
+    assert session.accept(frame) == "আমি ভালো আছি"
+    assert recognizer.frames == [1600, 1600, 1600]
+
+
+def test_zipformer_session_reports_endpoint_and_resets_for_the_next_turn():
+    session, recognizer = _session(["আমি ভালো আছি"])
+    session.accept(np.zeros(1600, dtype=np.float32))
+    assert not session.is_endpoint()
+
+    recognizer.endpoint = True
+    assert session.is_endpoint()
+
+    session.reset()
+    assert recognizer.resets == 1
+    assert session.text == ""
+
+
+def test_zipformer_session_finish_flushes_the_tail():
+    """Without the padding the decoder can still be holding the final word
+    when a caller hangs up."""
+    session, recognizer = _session(["শেষ"])
+    session.accept(np.zeros(1600, dtype=np.float32))
+    assert session.finish(tail_padding_seconds=0.5, sample_rate=16000) == "শেষ"
+    assert recognizer.frames[-1] == 8000
+    assert recognizer.finished
+
+
+def test_speak_stream_yields_each_clause_before_the_whole_reply_is_done():
+    """What makes streaming worth it: the first clause is available after one
+    synthesize(), not after all of them."""
+    engine = ChunkingFakeTTSEngine()
+    stream = engine.speak_stream("এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।")
+
+    first = next(stream)
+    assert len(engine.calls) == 1
+    assert first.samples.size == 44100
+
+    rest = list(stream)
+    assert len(engine.calls) == 3
+    assert len(rest) == 2
+
+
+def test_speak_joins_what_speak_stream_yields():
+    """One override, both shapes: speak() is defined in terms of the stream."""
+    engine = ChunkingFakeTTSEngine()
+    audio = engine.speak("এক দুই তিন। চার পাঁচ ছয়।")
+    assert len(engine.calls) == 2
+    assert audio.samples.size == 2 * 44100 + round(0.08 * 44100)
+
+
+def test_plain_engine_speak_stream_yields_once():
+    engine = FakeTTSEngine()
+    parts = list(engine.speak_stream("এক দুই তিন। চার পাঁচ ছয়।"))
+    assert len(parts) == 1
+    assert len(engine.calls) == 1
+
+
+class StubASRSession:
+    """A ZipformerSession-shaped stub: endpoints once the caller has sent
+    endpoint_after frames, so turn-taking is drivable from a test."""
+
+    def __init__(self, texts, endpoint_after=None):
+        self.texts = list(texts)
+        self.endpoint_after = endpoint_after
+        self.frames = 0
+        self.resets = 0
+        self.finished = False
+
+    def accept(self, samples, sample_rate=16000):
+        self.frames += 1
+        return self.texts[min(self.frames, len(self.texts)) - 1]
+
+    def is_endpoint(self):
+        return self.endpoint_after is not None and self.frames >= self.endpoint_after
+
+    def reset(self):
+        self.resets += 1
+        self.texts = [""]
+        self.endpoint_after = None
+
+    def finish(self, tail_padding_seconds=1.0, sample_rate=16000):
+        self.finished = True
+        return self.texts[-1]
+
+
+def voicebot_client(monkeypatch, session=None, tts_engine=None):
+    """Build the voicebot app with both models stubbed, so the sockets are
+    exercised without loading a checkpoint."""
+    asr = SimpleNamespace(load=lambda **kwargs: None, stream=lambda: session)
+    monkeypatch.setattr(voicebot_app.zipformer, "build", lambda device: asr)
+    monkeypatch.setattr(voicebot_app.parler, "build", lambda device: tts_engine)
+    monkeypatch.setattr(settings, "TTS_ENABLED", tts_engine is not None)
+    return TestClient(voicebot_app.create_voicebot_app())
+
+
+def pcm_frame(samples=1600):
+    return np.zeros(samples, dtype="<i2").tobytes()
+
+
+def test_voicebot_asr_emits_partials_then_a_final_on_endpoint(monkeypatch):
+    session = StubASRSession(["আমি", "আমি ভালো", "আমি ভালো আছি"], endpoint_after=3)
+    with voicebot_client(monkeypatch, session=session) as client:
+        with client.websocket_connect("/api/v1/voicebot/asr") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_bytes(pcm_frame())
+            assert ws.receive_json() == {"type": "partial", "text": "আমি"}
+            ws.send_bytes(pcm_frame())
+            assert ws.receive_json() == {"type": "partial", "text": "আমি ভালো"}
+            ws.send_bytes(pcm_frame())
+            assert ws.receive_json() == {"type": "final", "text": "আমি ভালো আছি"}
+    assert session.resets == 1
+
+
+def test_voicebot_asr_does_not_repeat_an_unchanged_partial(monkeypatch):
+    """A frame that decodes to no new text must stay silent, or the caller is
+    flooded with duplicates at frame rate."""
+    session = StubASRSession(["আমি", "আমি"])
+    with voicebot_client(monkeypatch, session=session) as client:
+        with client.websocket_connect("/api/v1/voicebot/asr") as ws:
+            ws.receive_json()
+            ws.send_bytes(pcm_frame())
+            assert ws.receive_json()["text"] == "আমি"
+            ws.send_bytes(pcm_frame())
+            ws.send_text(json.dumps({"type": "end"}))
+            assert ws.receive_json() == {"type": "final", "text": "আমি"}
+            assert ws.receive_json() == {"type": "done"}
+    assert session.finished
+
+
+def test_voicebot_tts_streams_pcm_frames_per_clause(monkeypatch):
+    engine = FakeTTSEngine()
+    with voicebot_client(monkeypatch, tts_engine=engine) as client:
+        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_text(json.dumps({"type": "text", "text": "এক দুই তিন।"}))
+
+            start = ws.receive_json()
+            assert start["type"] == "audio_start"
+            assert start["sample_rate"] == 44100
+
+            received = 0
+            while received < start["bytes"]:
+                received += len(ws.receive_bytes())
+            assert received == start["bytes"]
+            assert ws.receive_json()["type"] == "audio_end"
+
+            ws.send_text(json.dumps({"type": "end"}))
+            assert ws.receive_json()["type"] == "done"
+    assert engine.calls == [("এক দুই তিন।", settings.TTS_VOICE, None)]
+
+
+def test_voicebot_tts_holds_an_incomplete_clause_until_flush(monkeypatch):
+    """Text arrives as LLM deltas; a clause is only spoken once complete."""
+    engine = FakeTTSEngine()
+    with voicebot_client(monkeypatch, tts_engine=engine) as client:
+        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
+            ws.receive_json()
+            ws.send_text(json.dumps({"type": "text", "text": "আমি ভালো"}))
+            ws.send_text(json.dumps({"type": "flush"}))
+            assert ws.receive_json()["type"] == "audio_start"
+    assert [call[0] for call in engine.calls] == ["আমি ভালো"]
+
+
+def test_voicebot_tts_cancel_is_barge_in(monkeypatch):
+    """Cancel bumps the generation, which drops queued clauses so the caller
+    stops hearing the old answer."""
+    engine = FakeTTSEngine()
+    with voicebot_client(monkeypatch, tts_engine=engine) as client:
+        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
+            ws.receive_json()
+            ws.send_text(json.dumps({"type": "cancel"}))
+            cancelled = ws.receive_json()
+            assert cancelled == {"type": "cancelled", "generation": 1}
+
+
+def test_voicebot_tts_rejects_an_unknown_voice(monkeypatch):
+    engine = FakeTTSEngine()
+    with voicebot_client(monkeypatch, tts_engine=engine) as client:
+        with client.websocket_connect("/api/v1/voicebot/tts") as ws:
+            ws.receive_json()
+            ws.send_text(json.dumps({"type": "configure", "voice": "Nobody"}))
+            assert "unknown voice" in ws.receive_json()["message"]
+
+
+def test_voicebot_tts_socket_closes_when_tts_is_disabled(monkeypatch):
+    with voicebot_client(monkeypatch, session=StubASRSession([""])) as client:
+        with pytest.raises(Exception):
+            with client.websocket_connect("/api/v1/voicebot/tts") as ws:
+                ws.receive_json()
+
+
+def test_pcm_to_float32_round_trips_full_scale():
+    pcm = np.array([0, 16384, -16384], dtype="<i2").tobytes()
+    assert np.allclose(pcm_to_float32(pcm), [0.0, 0.5, -0.5])
+
+
+def test_zipformer_provider_defaults_to_cpu_and_is_configurable(monkeypatch):
+    """The provider comes from ZIPFORMER_PROVIDER, not ACCELERATOR: it is a
+    property of the installed wheel, not of the device LitServe assigns."""
+    from src.litserver.zipformer.engine import build as zipformer_build
+
+    monkeypatch.setattr(settings, "ACCELERATOR", "cuda")
+    assert zipformer_build("cuda:0").provider == "cpu"
+
+    monkeypatch.setattr(settings, "ZIPFORMER_PROVIDER", "cuda")
+    assert zipformer_build("cpu").provider == "cuda"
+
+
+def test_zipformer_passes_its_provider_to_the_recognizer(monkeypatch):
+    _, recognizer_kwargs = _capture_zipformer_load(monkeypatch)
+    ZipformerEngine(model_name="dummy", provider="cuda").load(warmup_seconds=0)
+    assert recognizer_kwargs["provider"] == "cuda"
+
+
+def test_zipformer_warns_when_cuda_is_asked_of_a_cpu_only_wheel(monkeypatch, caplog):
+    """The failure mode this guards is silent: onnxruntime falls back to CPU
+    rather than erroring, so a misconfigured deploy just runs slow."""
+    _capture_zipformer_load(monkeypatch)
+    monkeypatch.setattr(
+        ZipformerEngine, "wheel_supports_cuda", staticmethod(lambda: False)
+    )
+    engine = ZipformerEngine(model_name="dummy", provider="cuda")
+
+    messages = []
+    handler_id = logger.add(lambda m: messages.append(m), level="WARNING")
+    try:
+        engine.load(warmup_seconds=0)
+    finally:
+        logger.remove(handler_id)
+
+    assert any("CPU-only" in m for m in messages)
+
+
+def test_zipformer_does_not_warn_when_the_wheel_matches(monkeypatch):
+    _capture_zipformer_load(monkeypatch)
+    monkeypatch.setattr(
+        ZipformerEngine, "wheel_supports_cuda", staticmethod(lambda: True)
+    )
+    engine = ZipformerEngine(model_name="dummy", provider="cuda")
+
+    messages = []
+    handler_id = logger.add(lambda m: messages.append(m), level="WARNING")
+    try:
+        engine.load(warmup_seconds=0)
+    finally:
+        logger.remove(handler_id)
+
+    assert not any("CPU-only" in m for m in messages)
+
+
+def test_wheel_supports_cuda_reads_the_installed_local_version():
+    """The CPU wheel here is a plain version, so this must be False."""
+    assert ZipformerEngine.wheel_supports_cuda() is False
+
+
+def test_base_module_does_not_import_torch():
+    """The ASR side is pure ONNX. Importing torch in base.py would put a
+    multi-GB dependency on that path for one helper only TTS uses."""
+    import ast
+
+    tree = ast.parse(pathlib.Path("src/litserver/base.py").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "torch" not in imported
+
+
+def test_resolve_device_lives_with_the_engine_that_needs_torch():
+    from src.litserver.parler.engine import ParlerTTSEngine
+
+    assert not hasattr(BaseTTSEngine, "resolve_device")
+    assert ParlerTTSEngine.resolve_device("cpu") == "cpu"
+
+
+def test_openai_speech_endpoint_returns_wav(tts_client):
+    """Drop-in for a client written against the OpenAI speech API: same body,
+    raw audio back, reachable by base URL alone."""
+    resp = tts_client.post(
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "voice": "Aditi", "response_format": "wav"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
+    with wave.open(io.BytesIO(resp.content), "rb") as wf:
+        assert wf.getframerate() == 44100
+
+
+def test_openai_speech_pcm_strips_the_wav_header(tts_client):
+    """A caller feeding telephony wants frames, not a container."""
+    wav = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    pcm = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "response_format": "pcm"}
+    )
+    assert pcm.status_code == 200
+    assert pcm.headers["content-type"] == "audio/pcm"
+    assert pcm.headers["X-Audio-Sample-Rate"] == "44100"
+    assert len(pcm.content) < len(wav.content)
+    assert not pcm.content.startswith(b"RIFF")
+
+
+def test_openai_transcriptions_endpoint(asr_client):
+    """Drop-in for a client written against the OpenAI transcription API:
+    multipart in, {"text": ...} out, segments joined into one utterance."""
+    wav = base64.b64decode(make_wav_base64())
+    resp = asr_client.post(
+        "/v1/audio/transcriptions", files={"file": ("a.wav", wav, "audio/wav")}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"text": "হ্যালো"}
+
+
+def test_gateway_health_reports_both_models(info_client):
+    body = info_client.get("/health").json()
+    assert body["status"] == "ok"
+    assert body["asr"] == settings.ACTIVE_MODEL_NAME
+
+
+def test_gateway_sets_cors_headers(info_client):
+    """The chatbot proxies TTS server-side today only because this service had
+    no CORS. With it, a separately hosted UI can call the gateway directly."""
+    resp = info_client.get(
+        "/api/v1/asr/info", headers={"Origin": "https://ui.example.com"}
+    )
+    assert resp.headers["access-control-allow-origin"] == "*"
+
+
+def test_asr_route_matches_what_the_chatbot_ui_posts(asr_client):
+    """The UI posts a MediaRecorder blob plus model_type and reads
+    output[0].source. Caddy proxies /asr* straight here, so it lives on the
+    ASR service itself, not on the chatbot."""
+    wav = base64.b64decode(make_wav_base64())
+    resp = asr_client.post(
+        "/asr",
+        files={"file": ("recording.webm", wav, "audio/webm")},
+        data={"model_type": "zipformer"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["output"][0]["source"] == "হ্যালো"
+
+
+def test_asr_route_ignores_an_unknown_model_type(asr_client):
+    """One engine is served, so the field is advisory rather than a 400."""
+    wav = base64.b64decode(make_wav_base64())
+    resp = asr_client.post(
+        "/asr",
+        files={"file": ("recording.webm", wav, "audio/webm")},
+        data={"model_type": "whisper"},
+    )
+    assert resp.status_code == 200

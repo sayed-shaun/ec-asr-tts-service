@@ -17,19 +17,14 @@ dependencies = [
 
 [project.optional-dependencies]
 serve = [
-    "nemo_toolkit[asr]>=2.0.0",
-    "transformers>=4.40.0",
+    "torch>=2.0.0",
     "litserve>=0.2.9",
-    # <1.0: librosa 1.0 dropped the automatic soundfile->audioread fallback
-    # decode_base64_audio (src/utils/audio.py) relies on for compressed
-    # formats (webm/opus, mp3, ...) -- e.g. what browser MediaRecorder sends.
     "librosa>=0.10.0,<1.0",
     "soundfile>=0.12.1",
     "numpy>=1.24.0",
     "sherpa-onnx>=1.10.0",
     "huggingface-hub>=0.23.0",
-    "bitsandbytes>=0.43.0",
-    "accelerate>=0.30.0",
+    "parler-tts @ git+https://github.com/huggingface/parler-tts.git",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -63,15 +58,8 @@ select = ["E", "F", "I"]
 
 [tool.pytest.ini_options]
 filterwarnings = [
-    # librosa -> audioread's pure-Python fallback decoder imports these unconditionally;
-    # removed from the stdlib in Python 3.13, audioread falls back to the standard-aifc/
-    # standard-sunau backport packages, which warn on every import. Nothing on our side
-    # to fix — nothing in this repo touches aifc/sunau directly.
     "ignore:aifc was removed in Python 3.13:DeprecationWarning",
     "ignore:sunau was removed in Python 3.13:DeprecationWarning",
-    # Expected for any compressed format (webm/opus, mp4, mp3, ...) — soundfile/
-    # libsndfile only reads a handful of container formats, so decode_base64_audio's
-    # audioread/ffmpeg fallback is the intended path for anything else, not a bug.
     "ignore:PySoundFile failed. Trying audioread instead.:UserWarning",
     "ignore:librosa.core.audio.__audioread_load:FutureWarning",
 ]

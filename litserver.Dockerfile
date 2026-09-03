@@ -19,6 +19,13 @@ COPY pyproject.toml .
 RUN mkdir -p src && touch src/__init__.py
 RUN pip install --no-cache-dir --break-system-packages ".[serve]"
 
+ARG SHERPA_ONNX_CUDA_VERSION=""
+RUN if [ -n "$SHERPA_ONNX_CUDA_VERSION" ]; then \
+        pip install --no-cache-dir --break-system-packages --force-reinstall \
+            "sherpa-onnx==${SHERPA_ONNX_CUDA_VERSION}" \
+            -f https://k2-fsa.github.io/sherpa/onnx/cuda.html; \
+    fi
+
 COPY . .
 
 EXPOSE 8000

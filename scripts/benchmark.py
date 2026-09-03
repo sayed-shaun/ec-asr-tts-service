@@ -1,36 +1,18 @@
 """Evaluate an ASR HTTP endpoint against ground-truth transcripts, computing
 WER/CER and writing predictions.json + report.txt to --output-dir.
 
-Requests run concurrently (--concurrency, default 10) via asyncio + httpx, so
-the report captures response time and throughput *under concurrent load*, not
-just one-at-a-time latency — the two can differ a lot (see "Concurrency"
-below): request wall_clock_seconds is the per-request response time, while
-the whole run's wall-clock time gives real throughput (requests/sec) at that
-concurrency level, and the batch's latency percentiles (p50/p95/p99) show
-how much slower requests get when several are in flight at once.
+Requests run concurrently (--concurrency, default 10), so the report captures
+response time and throughput under concurrent load: wall_clock_seconds is
+per-request, the run's wall-clock time gives requests/sec at that concurrency,
+and p50/p95/p99 show how much slower requests get with several in flight.
 
-Requires --data-dir to contain a data.tar (one archive member per audio
-file) plus a ground_truth.json (tar member name -> {transcription,
-raw_transcription}) — the format scripts/download_eval_data.py produces.
-Audio is read directly out of data.tar on the fly (no extraction step) via
-Python's stdlib tarfile. There is no ground truth for benchmark quality
-without it, so this script errors out rather than silently falling back to
-a latency-only report.
+--data-dir must hold a data.tar plus a ground_truth.json in the format
+scripts/download_eval_data.py produces; audio is read out of the tar on the
+fly. Without ground truth this errors out rather than falling back to a
+latency-only report.
 
 --api-url takes any endpoint sharing this pipeline's request/response contract
-(config.language.sourceLanguage, audio[].audioContent base64, output[].source)
-— e.g. this service's internal /predict, or a legacy comparable service.
-
-Audio is normalized to 16-bit PCM WAV before sending (see ensure_pcm16_wav):
-FLEURS ships 32-bit float WAV, which Python's stdlib `wave` module — and
-evidently some legacy ASR services built on it — can't read at all ("unknown
-format: 3"). PCM16 is the universally-supported baseline and costs nothing
-for services that already handle float WAV fine.
-
-WER/CER strip punctuation before comparing (see normalize_for_wer): FLEURS
-references carry quotes and the Bengali daŗi (।) that no model transcribes,
-which otherwise inflates error rates with word-boundary artifacts rather than
-real transcription mistakes.
+(config.language.sourceLanguage, audio[].audioContent, output[].source).
 
 Requires the `eval` extra: pip install ".[eval]" (jiwer, tqdm, soundfile;
 httpx is already a base dependency).
@@ -68,11 +50,9 @@ PUNCTUATION_RE = re.compile(r"[\"“”‘’'।,.!?;:()\[\]{}—–\-]")
 def normalize_for_wer(text: str) -> str:
     """Strip punctuation before WER/CER comparison.
 
-    FLEURS references carry quotes, the Bengali daŗi (।), and other
-    punctuation that models never transcribe. Left in, a quoted or
-    period-adjacent word reads as a different token from the model's
-    unpunctuated output — inflating WER/CER with word-boundary artifacts
-    that have nothing to do with transcription accuracy.
+    FLEURS references carry quotes and the Bengali daŗi (।) that models never
+    transcribe, which otherwise inflates error rates with word-boundary
+    artifacts rather than real transcription mistakes.
     """
     return re.sub(r"\s+", " ", PUNCTUATION_RE.sub(" ", text)).strip()
 
@@ -84,11 +64,9 @@ class ResponseOutput(BaseModel):
 class AsrEndpointResponse(BaseModel):
     """Expected shape of an ASR endpoint's response, validated before use.
 
-    A self-contained copy of src/api/v1/asr/schema.py's AsrResponse rather
-    than an import: scripts/ run standalone (python scripts/benchmark.py),
-    and importing across into src/ from there needs a sys.path hack this
-    tool doesn't otherwise need. time_taken is optional since --api-url may
-    point at a legacy service (e.g. wav2vec2) that doesn't report it.
+    A self-contained copy of AsrResponse rather than an import, since scripts/
+    runs standalone. time_taken is optional: --api-url may point at another
+    service that doesn't report it.
     """
 
     output: list[ResponseOutput]
@@ -107,19 +85,13 @@ class EndpointResult:
 def ensure_pcm16_wav(audio_bytes: bytes) -> bytes:
     """Re-encode audio as 16-bit PCM WAV, the universally-supported baseline.
 
-    FLEURS ships 32-bit float WAV; Python's stdlib `wave` module can't read
-    that at all ("unknown format: 3"), and at least one legacy ASR service
-    built on it hits the exact same error. Falls back to the original bytes
-    if soundfile can't read the source (e.g. mp3, which libsndfile doesn't
-    support) rather than failing the whole request.
+    FLEURS ships 32-bit float WAV, which the stdlib `wave` module can't read
+    ("unknown format: 3"). Falls back to the original bytes when soundfile
+    can't read the source rather than failing the request.
 
-    Reads as float32 and scales to int16 manually rather than
-    sf.read(dtype="int16") directly: the latter does not apply the
-    expected float->int16 scale factor for a float-source WAV in this
-    soundfile/libsndfile version, silently truncating samples to near
-    zero (confirmed: max amplitude dropped from 0.63 to 0.00003) instead
-    of raising, which produced near-silent audio and made every request
-    transcribe to the same short garbage output regardless of content.
+    Scales float32 to int16 by hand: sf.read(dtype="int16") skips the
+    float->int16 scale factor for a float-source WAV in this libsndfile
+    version, silently producing near-silent audio instead of raising.
     """
     try:
         data, samplerate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
@@ -142,15 +114,11 @@ def build_payload(audio_bytes: bytes) -> dict:
 async def call_endpoint(
     client: httpx.AsyncClient, url: str, payload: dict, timeout: float
 ) -> EndpointResult:
-    """POST payload to an ASR endpoint, time it, and validate the response
-    against AsrEndpointResponse before trusting it.
+    """POST payload to an ASR endpoint, time it, and validate the response.
 
-    Catches HTTPError (network/timeout/HTTP-status errors), ValueError
-    (resp.json() on a non-JSON body), and ValidationError (JSON body that
-    doesn't match the expected {output: [{source}], time_taken} shape)
-    broadly-but-specifically so one flaky or wrongly-shaped response doesn't
-    abort the whole run — and so a schema mismatch is reported distinctly
-    from a network failure instead of silently returning an empty transcript.
+    Catches network, non-JSON and schema-mismatch failures separately so one
+    bad response doesn't abort the run, and so a schema mismatch is reported
+    distinctly rather than as an empty transcript.
     """
     start = time.monotonic()
     try:
@@ -159,9 +127,6 @@ async def call_endpoint(
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            # Include the response body: it usually carries the server's
-            # actual reason (stack trace, "unsupported format", etc.) that
-            # the generic "500 Internal Server Error" status line discards.
             body = resp.text.strip()
             detail = f" — body: {body[:500]}" if body else ""
             return EndpointResult(
@@ -311,7 +276,7 @@ def main() -> None:
     parser.add_argument(
         "--api-url",
         required=True,
-        help="ASR endpoint to benchmark (wav2vec2, this pipeline, etc.)",
+        help="ASR endpoint to benchmark (this pipeline, or another service)",
     )
     parser.add_argument(
         "--data-dir",
@@ -365,7 +330,7 @@ def main() -> None:
     references = [normalize_for_wer(r["reference"]) for r in records]
     hypotheses = [
         normalize_for_wer(r["transcript"]) for r in records
-    ]  # empty string for failed calls, counts as total miss
+    ]
 
     words = jiwer.process_words(references, hypotheses)
     chars = jiwer.process_characters(references, hypotheses)

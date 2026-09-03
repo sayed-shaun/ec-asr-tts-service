@@ -1,17 +1,14 @@
 """Inverse text normalization for Bengali numerals: spelled-out numbers in
 the model's output rewritten as digits.
 
-The checkpoint always spells numbers out ("আটশো দুই"), while real Bengali
-transcripts write them as digits ("802") — measured on this project's FLEURS
-benchmark, 220 of 242 digit-bearing references use ASCII digits and none of
-1322 hypotheses contain a digit at all. That formatting gap accounts for 38%
-of all word errors despite digit-bearing utterances being only 18% of the
+The checkpoint always spells numbers out ("আটশো দুই") while real transcripts
+use digits ("802"); on this project's FLEURS benchmark that gap accounts for
+38% of all word errors despite digit-bearing utterances being 18% of the
 corpus.
 
-Design is deliberately conservative: NUMERALS is an allowlist, and any token
-not in it terminates the run and passes through byte-identical. A missing or
-misspelled numeral word therefore causes a missed conversion, never corrupted
-text — the failure mode is "did nothing", not "mangled a sentence".
+Deliberately conservative: the numeral tables are an allowlist, and any token
+not in them ends the run and passes through byte-identical. The failure mode
+is a missed conversion, never mangled text.
 """
 
 import re
@@ -137,7 +134,6 @@ _SMALL = {
     "নিরানব্বই": 99,
 }
 
-# Ordered longest-first so "শত" is tried before "শ" when splitting compounds.
 _SCALES = {
     "কোটি": 10_000_000,
     "লক্ষ": 100_000,
@@ -152,17 +148,14 @@ _DECIMAL = {"দশমিক"}
 
 _NUMERAL_TOKENS = set(_SMALL) | set(_SCALES) | _DECIMAL
 
-# Bengali digits appear in some references; normalize them for parsing only.
 _BENGALI_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
 
 def _expand(token: str) -> list[str] | None:
     """Split a compound numeral like "আটশো" into ["আট", "শো"].
 
-    The model writes hundreds as one word, so without this the whole token
-    misses the allowlist and the number is never converted. Returns None for
-    anything that is not a numeral, which is what keeps non-numeric text
-    untouched.
+    The model writes hundreds as one word, which would otherwise miss the
+    allowlist. None for anything that is not a numeral.
     """
     if token in _NUMERAL_TOKENS:
         return [token]
@@ -187,8 +180,6 @@ def _parse_int(tokens: list[str]) -> int | None:
         scale = _SCALES.get(token)
         if scale is None:
             return None
-        # "শো" multiplies what precedes it and stays in the running value;
-        # হাজার/লাখ/কোটি close off a group and commit it to the total.
         if scale == 100:
             current = (current or 1) * 100
         else:
@@ -208,8 +199,6 @@ def _render_run(tokens: list[str], min_value: int) -> str | None:
         whole = _parse_int(whole_tokens) if whole_tokens else 0
         if whole is None:
             return None
-        # "দুই দশমিক চার" -> 2.4; digits after the point are read out in
-        # sequence rather than as one quantity.
         frac_parts = []
         for token in frac_tokens:
             value = _parse_int([token])
@@ -222,9 +211,6 @@ def _render_run(tokens: list[str], min_value: int) -> str | None:
     if value is None:
         return None
     has_scale = any(t in _SCALES for t in tokens)
-    # A bare small numeral is usually prose ("এক ব্যক্তি"), where references
-    # keep the word; only convert it once it is large enough or carries a
-    # scale word to read as a real quantity.
     if not has_scale and value < min_value:
         return None
     return str(value)
@@ -233,10 +219,9 @@ def _render_run(tokens: list[str], min_value: int) -> str | None:
 def bengali_numerals_to_digits(text: str, min_value: int = 10) -> str:
     """Rewrite spelled-out Bengali numbers in `text` as ASCII digits.
 
-    min_value gates bare numerals with no scale word: below it they are left
-    as words, since small numbers in running prose are normally spelled out.
-    Set 0 to convert every numeral, or a very large value to convert only
-    those carrying শো/হাজার/লাখ/কোটি.
+    min_value gates bare numerals carrying no scale word, since small numbers
+    in running prose are normally spelled out. 0 converts every numeral; a
+    very large value converts only those with শো/হাজার/লাখ/কোটি.
     """
     if not text:
         return text
@@ -251,7 +236,6 @@ def bengali_numerals_to_digits(text: str, min_value: int = 10) -> str:
             i += 1
             continue
 
-        # Collect the longest run of consecutive numeral words.
         run_tokens: list[str] = []
         run_end = i
         j = i

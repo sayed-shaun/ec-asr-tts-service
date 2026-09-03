@@ -1,41 +1,29 @@
 import base64
-from typing import Awaitable
+import json
 
-import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
+from loguru import logger
 
 from src.api import client as litserve_client
+from src.api.client import forward_to_litserve
 from src.api.v1.asr.schema import AsrRequest
 from src.core.config import settings
 
 router = APIRouter(prefix="/api/v1/asr", tags=["ASR"])
 
+compat_router = APIRouter(tags=["ASR"])
+"""Paths the EC chatbot UI calls directly through Caddy, which reverse-proxies
+/asr* to this service rather than through the chatbot backend."""
 
-async def forward_to_litserve(call: Awaitable[httpx.Response]) -> httpx.Response:
-    """Await a litserve_client call, turning connection failures into HTTP
-    errors a client can distinguish (502: litserver unreachable, 504: it
-    accepted the connection but didn't respond in time) instead of a bare 500.
-    """
-    try:
-        return await call
-    except httpx.TimeoutException as exc:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="LitServe request timed out",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="LitServe is unreachable"
-        ) from exc
+openai_router = APIRouter(tags=["ASR"])
+"""The OpenAI transcription contract, mounted at the root so a client written
+against that API reaches this service by base URL alone."""
 
 
 @router.get("/info")
 async def info() -> dict:
-    """Static metadata about the deployed model/endpoint. Safe to call
-    from the main process — unlike /predict, it does not touch the
-    model itself.
-    """
+    """Static metadata about the deployed model. Never touches the model."""
     return {
         "model": settings.ACTIVE_MODEL_NAME,
         "language": "bn",
@@ -45,11 +33,10 @@ async def info() -> dict:
 
 @router.post("/transcribe")
 async def transcribe(request: AsrRequest) -> JSONResponse:
-    """Raw JSON inference — same request/response contract as LitServe's
-    internal /predict, forwarded as a real HTTP request (this process never
-    loads the model itself). Prefer this over /transcribe/file for any
-    client that can send base64 JSON directly; /transcribe/file exists only
-    because Swagger UI can't render a base64 text box nicely.
+    """Raw JSON inference, forwarded to LitServe's /predict over real HTTP.
+
+    Prefer this over /transcribe/file for any client that can send base64
+    JSON directly.
     """
     async with litserve_client.get_litserve_client() as client:
         resp = await forward_to_litserve(
@@ -61,13 +48,10 @@ async def transcribe(request: AsrRequest) -> JSONResponse:
 
 @router.post("/transcribe/file")
 async def transcribe_file(file: UploadFile = File(...)) -> JSONResponse:
-    """Swagger-friendly file-upload wrapper around POST {predict_path}.
+    """Multipart-upload wrapper around /transcribe.
 
-    The real inference endpoint takes base64-encoded JSON (so any client, not
-    just browsers, can drive it) which Swagger UI can only render as a plain
-    text box. This gives Swagger UI's "Choose File" button something to call,
-    forwarding as a real HTTP request to the LitServe model server (this
-    process never loads the model itself).
+    Exists because Swagger UI can only render the real base64-JSON endpoint
+    as a plain text box.
     """
     audio_bytes = await file.read()
     if not audio_bytes:
@@ -82,3 +66,37 @@ async def transcribe_file(file: UploadFile = File(...)) -> JSONResponse:
         )
 
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+@openai_router.post("/v1/audio/transcriptions")
+async def audio_transcriptions(file: UploadFile = File(...)) -> JSONResponse:
+    """OpenAI-compatible transcription: multipart audio in, {"text": ...} out.
+
+    The counterpart to POST /v1/audio/speech. Segments are joined into one
+    utterance because a caller feeding a chat turn wants the whole thing, not
+    the service's internal split.
+    """
+    response = await transcribe_file(file)
+    if response.status_code >= 400:
+        return response
+    body = json.loads(bytes(response.body))
+    text = " ".join(item.get("source", "") for item in body.get("output", []))
+    return JSONResponse(content={"text": text.strip()})
+
+
+@compat_router.post("/asr")
+async def asr_upload(
+    file: UploadFile = File(...), model_type: str = Form(default="")
+) -> JSONResponse:
+    """Multipart upload returning this pipeline's own {output: [{source}]}.
+
+    What the chatbot UI posts recorded audio to. It sits at the root, not
+    under /api/v1, because Caddy routes /asr* straight here -- a path outside
+    that prefix would need a proxy rule of its own.
+
+    model_type is accepted and ignored: the caller names an engine, and this
+    service serves exactly one.
+    """
+    if model_type and model_type != "zipformer":
+        logger.info(f"ignoring requested model_type '{model_type}'")
+    return await transcribe_file(file)
