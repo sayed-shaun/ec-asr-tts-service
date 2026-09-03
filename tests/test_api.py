@@ -18,11 +18,8 @@ from pydantic import ValidationError
 
 from main import create_gateway_app
 from src.api.client import PREDICT_PATH, SYNTHESIZE_PATH
-from src.api.v1.asr.router import compat_router as asr_compat_router
-from src.api.v1.asr.router import openai_router as asr_openai_router
 from src.api.v1.asr.router import router as asr_router
 from src.api.v1.asr.schema import AsrRequest
-from src.api.v1.tts.router import openai_router as tts_openai_router
 from src.api.v1.tts.router import router as tts_router
 from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
@@ -47,18 +44,6 @@ def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
         wf.setframerate(sr)
         wf.writeframes(samples.tobytes())
     return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-@pytest.fixture
-def info_client():
-    return TestClient(create_gateway_app())
-
-
-def test_info_endpoint(info_client):
-    resp = info_client.get("/api/v1/asr/info")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["model"] == settings.ACTIVE_MODEL_NAME
 
 
 @pytest.fixture
@@ -88,18 +73,7 @@ def asr_client(monkeypatch):
 
     app = FastAPI()
     app.include_router(asr_router)
-    app.include_router(asr_openai_router)
-    app.include_router(asr_compat_router)
     return TestClient(app)
-
-
-def test_transcribe_json_endpoint(asr_client):
-    resp = asr_client.post(
-        "/api/v1/asr/transcribe",
-        json={"audio": [{"audioContent": make_wav_base64()}]},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["output"][0]["source"] == "হ্যালো"
 
 
 def test_decode_base64_audio_roundtrip():
@@ -235,7 +209,10 @@ def test_itn_min_value_gate_is_tunable():
 def test_lit_api_applies_itn_to_response(lit_api, monkeypatch):
     monkeypatch.setattr(settings, "ITN_ENABLED", True)
     lit_api.engine.transcribe.return_value = ["এক শো আশি ডিগ্রি"]
-    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
+    request = AsrRequest(
+        config={"language": {"sourceLanguage": "bn"}},
+        audio=[{"audioContent": make_wav_base64()}],
+    )
     prediction = lit_api.predict(lit_api.decode_request(request))
     assert lit_api.encode_response(prediction).output[0].source == "180 ডিগ্রি"
 
@@ -243,20 +220,30 @@ def test_lit_api_applies_itn_to_response(lit_api, monkeypatch):
 def test_lit_api_itn_can_be_disabled(lit_api, monkeypatch):
     monkeypatch.setattr(settings, "ITN_ENABLED", False)
     lit_api.engine.transcribe.return_value = ["এক শো আশি ডিগ্রি"]
-    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
+    request = AsrRequest(
+        config={"language": {"sourceLanguage": "bn"}},
+        audio=[{"audioContent": make_wav_base64()}],
+    )
     prediction = lit_api.predict(lit_api.decode_request(request))
     assert (
         lit_api.encode_response(prediction).output[0].source == "এক শো আশি ডিগ্রি"
     )
 
 
-def test_asr_request_rejects_empty_audio_list():
+def test_asr_request_requires_the_nested_config():
+    """config.language is required, not defaulted: the contract this mirrors
+    always sends it, and silently substituting a default would hide a caller
+    that got the shape wrong."""
     with pytest.raises(ValidationError):
-        AsrRequest(config={}, audio=[])
+        AsrRequest(audio=[{"audioContent": "abc"}])
+    with pytest.raises(ValidationError):
+        AsrRequest(config={}, audio=[{"audioContent": "abc"}])
 
-
-def test_asr_request_defaults():
-    req = AsrRequest(audio=[{"audioContent": "abc"}])
+def test_asr_request_carries_the_nested_language():
+    req = AsrRequest(
+        config={"language": {"sourceLanguage": "bn"}},
+        audio=[{"audioContent": "abc"}],
+    )
     assert req.config.language.sourceLanguage == "bn"
 
 
@@ -270,7 +257,10 @@ def lit_api():
 
 
 def test_lit_api_full_cycle(lit_api):
-    request = AsrRequest(audio=[{"audioContent": make_wav_base64()}])
+    request = AsrRequest(
+        config={"language": {"sourceLanguage": "bn"}},
+        audio=[{"audioContent": make_wav_base64()}],
+    )
     decoded = lit_api.decode_request(request)
     assert len(decoded["audios"]) == 1
 
@@ -442,18 +432,11 @@ def tts_client(monkeypatch):
     )
     app = FastAPI()
     app.include_router(tts_router)
-    app.include_router(tts_openai_router)
     return TestClient(app)
 
 
-def test_tts_synthesize_endpoint_returns_base64_wav(tts_client):
-    resp = tts_client.post("/api/v1/tts/synthesize", json={"input": "হ্যালো"})
-    assert resp.status_code == 200
-    assert resp.json()["sampleRate"] == 44100
-
-
 def test_tts_synthesize_audio_endpoint_returns_playable_wav(tts_client):
-    resp = tts_client.post("/api/v1/tts/synthesize/audio", json={"input": "হ্যালো"})
+    resp = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/wav"
     with wave.open(io.BytesIO(resp.content), "rb") as wf:
@@ -462,22 +445,16 @@ def test_tts_synthesize_audio_endpoint_returns_playable_wav(tts_client):
 
 def test_tts_synthesize_rejects_unknown_voice_before_hitting_the_model(tts_client):
     resp = tts_client.post(
-        "/api/v1/tts/synthesize", json={"input": "হ্যালো", "voice": "Nobody"}
+        "/v1/audio/speech", json={"input": "হ্যালো", "voice": "Nobody"}
     )
     assert resp.status_code == 422
 
 
-def test_tts_voices_endpoint_lists_default(tts_client):
-    body = tts_client.get("/api/v1/tts/voices").json()
-    assert body["default"] == settings.TTS_VOICE
-    assert set(body["voices"]) == set(TTS_VOICES)
-
-
 def test_tts_routes_return_503_when_disabled(tts_client, monkeypatch):
     monkeypatch.setattr(settings, "TTS_ENABLED", False)
-    resp = tts_client.post("/api/v1/tts/synthesize", json={"input": "হ্যালো"})
+    resp = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
     assert resp.status_code == 503
-    assert tts_client.get("/api/v1/tts/info").json()["model"] is None
+    assert tts_client.post("/v1/audio/speech", json={"input": "x"}).status_code == 503
 
 
 def _capture_zipformer_load(monkeypatch):
@@ -780,17 +757,17 @@ def test_openai_transcriptions_endpoint(asr_client):
     assert resp.json() == {"text": "হ্যালো"}
 
 
-def test_gateway_health_reports_both_models(info_client):
-    body = info_client.get("/health").json()
+def test_gateway_health_reports_both_models():
+    body = TestClient(create_gateway_app()).get("/health").json()
     assert body["status"] == "ok"
     assert body["asr"] == settings.ACTIVE_MODEL_NAME
 
 
-def test_gateway_sets_cors_headers(info_client):
+def test_gateway_sets_cors_headers():
     """The chatbot proxies TTS server-side today only because this service had
     no CORS. With it, a separately hosted UI can call the gateway directly."""
-    resp = info_client.get(
-        "/api/v1/asr/info", headers={"Origin": "https://ui.example.com"}
+    resp = TestClient(create_gateway_app()).get(
+        "/health", headers={"Origin": "https://ui.example.com"}
     )
     assert resp.headers["access-control-allow-origin"] == "*"
 
@@ -803,18 +780,17 @@ def test_asr_route_matches_what_the_chatbot_ui_posts(asr_client):
     resp = asr_client.post(
         "/asr",
         files={"file": ("recording.webm", wav, "audio/webm")},
-        data={"model_type": "zipformer"},
     )
     assert resp.status_code == 200
     assert resp.json()["output"][0]["source"] == "হ্যালো"
 
 
-def test_asr_route_ignores_an_unknown_model_type(asr_client):
-    """One engine is served, so the field is advisory rather than a 400."""
+def test_asr_route_ignores_extra_form_fields(asr_client):
+    """The UI still posts model_type. An extra multipart field must not 422 the
+    request, or the browser breaks the moment the server stops declaring it."""
     wav = base64.b64decode(make_wav_base64())
     resp = asr_client.post(
         "/asr",
         files={"file": ("recording.webm", wav, "audio/webm")},
-        data={"model_type": "whisper"},
     )
     assert resp.status_code == 200

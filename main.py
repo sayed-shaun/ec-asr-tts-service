@@ -3,10 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from src.api.v1.asr.router import compat_router as asr_compat_router
-from src.api.v1.asr.router import openai_router as asr_openai_router
 from src.api.v1.asr.router import router as asr_router
-from src.api.v1.tts.router import openai_router as tts_openai_router
 from src.api.v1.tts.router import router as tts_router
 from src.core.config import settings
 from src.core.logging import configure_logging
@@ -35,10 +32,7 @@ def create_gateway_app() -> FastAPI:
                 "tts": settings.ACTIVE_TTS_MODEL_NAME}
 
     app.include_router(asr_router)
-    app.include_router(asr_openai_router)
-    app.include_router(asr_compat_router)
     app.include_router(tts_router)
-    app.include_router(tts_openai_router)
     return app
 
 

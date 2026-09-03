@@ -38,7 +38,7 @@ Bengali speech: streaming ASR (sherpa-onnx Zipformer2) and TTS (indic-parler-tts
 - **Architecture:** sherpa-onnx streaming Zipformer2 transducer (ONNX). Consumes audio as one growing stream, so there is no attention-memory blowup on long clips and no segmenting step
 - **Input:** 16 kHz mono (`SAMPLE_RATE`)
 - **License:** Apache-2.0 (commercial use OK)
-- **Swap it:** set `ZIPFORMER_MODEL_NAME`. Checkpoints name their ONNX files differently, so a different repo also needs a `ZipformerLayout` — see [`zipformer/layouts.py`](src/litserver/zipformer/layouts.py), which ships `VOSK_BN` and `K2_FSA`. `GET /api/v1/asr/info` reports what is actually loaded
+- **Swap it:** set `ZIPFORMER_MODEL_NAME`. Checkpoints name their ONNX files differently, so a different repo also needs a `ZipformerLayout` — see [`zipformer/layouts.py`](src/litserver/zipformer/layouts.py), which ships `VOSK_BN` and `K2_FSA`. `GET /health` reports what is actually loaded
 
 **Why this one, and only this one**
 
@@ -79,7 +79,7 @@ with the `ENGINE` switch and `MAX_SEGMENT_SECONDS` that existed to serve them.
 
 - **Checkpoint:** [`ai4bharat/indic-parler-tts`](https://huggingface.co/ai4bharat/indic-parler-tts) (`TTS_MODEL_NAME`) — ~2.6GB in bf16, GPU-resident, pulled from Hugging Face at load time
 - **Output:** mono 44.1 kHz; the gateway hands it back as base64 WAV, a playable `audio/wav` body, or raw PCM frames
-- **Voices:** named voices map to Parler style prompts in [`parler/voices.py`](src/litserver/parler/voices.py); `GET /api/v1/tts/voices` lists them, and a request's `description` overrides the prompt with free-form style text
+- **Voices:** named voices map to Parler style prompts in [`parler/voices.py`](src/litserver/parler/voices.py); a request's `description` overrides the prompt with free-form style text
 - **Long text** is split on clause boundaries at `TTS_MAX_CHARS` ([`parler/chunking.py`](src/litserver/parler/chunking.py)) and rejoined with a short pause, so a long reply doesn't hit the model as one generation.
 - **Turn it off** with `TTS_ENABLED=false` — worth doing whenever the GPU can't hold both checkpoints
 
@@ -101,10 +101,7 @@ flowchart LR
     Client(["Client"])
 
     subgraph Gateway["Gateway process — public — 0.0.0.0:GATEWAY_PORT"]
-        Info["GET /api/v1/asr/info"]
-        Transcribe["POST /api/v1/asr/transcribe"]
-        File["POST /api/v1/asr/transcribe/file"]
-        Speak["POST /api/v1/tts/synthesize"]
+        Asr["POST /asr"]
         OpenAI["POST /v1/audio/transcriptions<br/>POST /v1/audio/speech"]
     end
 
@@ -118,15 +115,10 @@ flowchart LR
         Health["GET /health"]
     end
 
-    Client -->|HTTP| Info
-    Client --> Transcribe
-    Client --> File
-    Client --> Speak
+    Client -->|HTTP| Asr
     Client --> OpenAI
 
-    Transcribe -->|real HTTP, httpx.AsyncClient| Predict
-    File -->|real HTTP, httpx.AsyncClient| Predict
-    Speak -->|real HTTP, httpx.AsyncClient| Synth
+    Asr -->|real HTTP, httpx.AsyncClient| Predict
     OpenAI -->|real HTTP, httpx.AsyncClient| Predict
     OpenAI -->|real HTTP, httpx.AsyncClient| Synth
     Predict --> LitAPI --> Engine
@@ -152,7 +144,7 @@ service.
 <details>
 <summary><code>/predict</code> is internal-only — details</summary>
 
-`POST /predict` (LitServe's own raw JSON inference route) only runs on the internal LitServe port; it is not proxied through the gateway. Externally, use `POST /api/v1/asr/transcribe` (raw base64 JSON) or `POST /api/v1/asr/transcribe/file` (multipart upload) — the gateway forwards either to `/predict` for you. Need raw base64-JSON access from outside the container? Either open the internal port at your own risk or add a passthrough route to the gateway.
+`POST /predict` (LitServe's own raw JSON inference route) only runs on the internal LitServe port; it is not proxied through the gateway. Externally, use `POST /asr` or `POST /v1/audio/transcriptions` — both take a multipart upload and forward it to `/predict` for you. Need raw base64-JSON access from outside the container? Either open the internal port at your own risk or add a passthrough route to the gateway.
 
 </details>
 
@@ -187,9 +179,9 @@ service.
 │   └── api/
 │       ├── client.py              # gateway -> LitServe HTTP client (shared by every router)
 │       └── v1/
-│           ├── asr/router.py      # /api/v1/asr/*, /v1/audio/transcriptions, /asr
+│           ├── asr/router.py      # POST /asr and /v1/audio/transcriptions
 │           ├── asr/schema.py      # request/response models
-│           ├── tts/router.py      # /api/v1/tts/*, /v1/audio/speech
+│           ├── tts/router.py      # POST /v1/audio/speech
 │           └── tts/schema.py      # request/response models
 ├── tests/test_api.py              # unit tests (models mocked)
 └── scripts/
@@ -248,25 +240,15 @@ pytest -q
 
 **Gateway** (`main.py`, public on `GATEWAY_PORT`):
 
-| | |
-|---|---|
-| `POST /api/v1/asr/transcribe` | raw base64 JSON, forwarded straight to `/predict` |
-| `POST /api/v1/asr/transcribe/file` | multipart file upload |
-| `GET /api/v1/asr/info` | ASR metadata: Hugging Face model name, language, sample rate |
-| `POST /api/v1/tts/synthesize` | text in, base64 WAV out |
-| `POST /api/v1/tts/synthesize/audio` | same synthesis, returned as a playable `audio/wav` body |
-| `GET /api/v1/tts/voices` | available voices and the style prompt each maps to |
-| `GET /api/v1/tts/info` | TTS metadata; `enabled: false` when `TTS_ENABLED=false` |
-| `GET /health` | gateway liveness — loads no model, so it answers while the model server is still warming up |
-| `GET /docs` | Swagger UI — WebSocket routes never appear here |
-
-**Drop-in compatibility routes**, mounted at the root so a client reaches them by base URL alone:
+All routes sit at the root, so a client reaches them by base URL alone.
 
 | | |
 |---|---|
 | `POST /v1/audio/transcriptions` | OpenAI-compatible transcription: multipart audio in, `{"text": …}` out (segments joined into one utterance) |
 | `POST /v1/audio/speech` | OpenAI-compatible speech: `{input, voice, response_format}` in, raw `wav`/`pcm` out (`pcm` strips the WAV header for telephony) |
-| `POST /asr` | what the chatbot UI posts recorded audio to through Caddy's `/asr*` proxy. Identical to `/api/v1/asr/transcribe/file`; the `model_type` form field is accepted and ignored, since this service serves exactly one engine |
+| `POST /asr` | multipart upload returning `{taskType, output: [{source}], time_taken}` — the existing contract, and what the chatbot UI posts to through Caddy's `/asr*` proxy. Extra form fields such as `model_type` are ignored |
+| `GET /health` | gateway liveness — loads no model, so it answers while the model server is still warming up |
+| `GET /docs` | Swagger UI |
 
 **LitServe** (`run_litserve.py`, internal only — no host port published):
 
@@ -279,7 +261,7 @@ pytest -q
 <details>
 <summary>Inference request / response payloads</summary>
 
-Request (internal `/predict`, and what `/api/v1/asr/transcribe/file` builds internally):
+Request (internal `/predict`, and what `POST /asr` builds internally):
 
 ```json
 {
@@ -303,7 +285,7 @@ Response:
 }
 ```
 
-TTS request (`/api/v1/tts/synthesize`, and internal `/synthesize`):
+TTS request (`POST /v1/audio/speech`, and internal `/synthesize`):
 
 ```json
 {
@@ -313,7 +295,7 @@ TTS request (`/api/v1/tts/synthesize`, and internal `/synthesize`):
 }
 ```
 
-`voice` picks a style prompt from `GET /api/v1/tts/voices`; `description` overrides
+`voice` is one of the names in [`parler/voices.py`](src/litserver/parler/voices.py); `description` overrides
 it with free-form style text. Both are optional — omitted, the request uses
 `TTS_VOICE`. Response:
 
@@ -339,7 +321,7 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 
 - `ZIPFORMER_MODEL_NAME` — the ASR checkpoint. A different repo layout also needs a `ZipformerLayout` (see [`zipformer/layouts.py`](src/litserver/zipformer/layouts.py)).
 - `ZIPFORMER_PROVIDER` — onnxruntime execution provider, `cpu` or `cuda`. Independent of `ACCELERATOR`; needs a matching wheel (see [Current Models](#current-models)).
-- `TTS_ENABLED` — mount the TTS LitAPI alongside ASR in the same LitServe process. Costs a second checkpoint's VRAM per worker; `false` serves ASR only and the TTS routes answer `503`.
+- `TTS_ENABLED` — **off by default.** Set `true` to mount the TTS LitAPI alongside ASR in the same LitServe process; it costs a second checkpoint's VRAM per worker. While off, ASR needs no GPU at all and `POST /v1/audio/speech` answers `503`.
 - `TTS_MODEL_NAME` / `TTS_VOICE` / `TTS_MAX_CHARS` — the TTS checkpoint, the voice used when a request names none, and the clause length text is split at before synthesis.
 - `ITN_ENABLED` — rewrite spelled-out Bengali numbers as digits. On by default; measured worth ~1.7 WER points on FLEURS.
 
@@ -361,13 +343,13 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 
 ```bash
 # transcribe a file through the gateway
-curl -F file=@path/to/audio.wav http://localhost:8000/api/v1/asr/transcribe/file
+curl -F file=@path/to/audio.wav http://localhost:8000/asr
 
 # the same thing, OpenAI-style
 curl -F file=@path/to/audio.wav http://localhost:8000/v1/audio/transcriptions
 
 # synthesize speech to a playable file
-curl -X POST http://localhost:8000/api/v1/tts/synthesize/audio \
+curl -X POST http://localhost:8000/v1/audio/speech \
     -H 'content-type: application/json' \
     -d '{"input": "আমি বাংলায় কথা বলি।", "voice": "Aditi"}' \
     -o out.wav
@@ -383,7 +365,7 @@ curl -X POST http://localhost:8000/api/v1/tts/synthesize/audio \
 ```bash
 pip install ".[eval]"
 python scripts/download_eval_data.py --data-dir data/eval_fleurs_bn
-python scripts/benchmark.py --api-url http://127.0.0.1:8000/api/v1/asr/transcribe \
+python scripts/benchmark.py --api-url http://127.0.0.1:8000/predict \
     --data-dir data/eval_fleurs_bn --output-dir benchmark_output
 ```
 

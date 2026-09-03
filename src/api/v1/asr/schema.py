@@ -1,36 +1,40 @@
-from pydantic import BaseModel, Field
+from typing import List
+
+from pydantic import BaseModel
 
 
 class Language(BaseModel):
-    sourceLanguage: str = "bn"
+    sourceLanguage: str
 
 
-class AsrConfig(BaseModel):
-    language: Language = Field(default_factory=Language)
-    audioFormat: str | None = "wav"
-    samplingRate: int | None = None
+class Config(BaseModel):
+    language: Language
 
 
 class AudioContent(BaseModel):
-    audioContent: str = Field(
-        ..., description="Base64-encoded audio (wav/flac/ogg/mp3)"
-    )
+    """A single base64-encoded audio clip."""
+
+    audioContent: str
 
 
 class AsrRequest(BaseModel):
-    config: AsrConfig = Field(default_factory=AsrConfig)
-    audio: list[AudioContent] = Field(..., min_length=1)
+    """Mirrors the Java service's request structure — nested `config.language`
+    instead of a flat field is part of that contract, not a design choice made here.
+    """
+
+    config: Config
+    audio: List[AudioContent]
 
 
 class Output(BaseModel):
+    """A single transcription result."""
+
     source: str
 
 
 class AsrResponse(BaseModel):
-    taskType: str = "asr"
-    output: list[Output]
+    """Mirrors the Java service's response structure."""
+
+    taskType: str
+    output: List[Output]
     time_taken: float
-
-
-class ErrorResponse(BaseModel):
-    detail: str

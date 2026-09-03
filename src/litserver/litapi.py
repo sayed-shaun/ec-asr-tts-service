@@ -15,12 +15,7 @@ from src.utils.audio import decode_base64_audio, warm_audio_decoder, wav_bytes
 from src.utils.itn import bengali_numerals_to_digits
 
 TTS_API_PATH = "/synthesize"
-
 ITN_MIN_VALUE = 10
-"""Bare numerals below this stay spelled out. Measured corpus-WER optimum over
-the 1322-clip FLEURS benchmark (0.1541 -> 0.1370; 0.2811 -> 0.1898 on
-digit-bearing references)."""
-
 
 class ASRLitAPI(ls.LitAPI):
     """Serves Bengali ASR over HTTP via the Zipformer engine."""
@@ -41,7 +36,7 @@ class ASRLitAPI(ls.LitAPI):
         return zipformer.build(device)
 
     def decode_request(self, request: AsrRequest) -> dict:
-        sample_rate = request.config.samplingRate or settings.SAMPLE_RATE
+        sample_rate = settings.SAMPLE_RATE
         try:
             audios = [
                 decode_base64_audio(item.audioContent, target_sr=sample_rate)
@@ -79,6 +74,7 @@ class ASRLitAPI(ls.LitAPI):
                 for text in texts
             ]
         return AsrResponse(
+            taskType="asr",
             output=[Output(source=text) for text in texts],
             time_taken=time_taken,
         )

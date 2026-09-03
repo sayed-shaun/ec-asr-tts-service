@@ -13,11 +13,7 @@ from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
 from src.litserver.parler.voices import VOICES
 
-router = APIRouter(prefix="/api/v1/tts", tags=["TTS"])
-
-openai_router = APIRouter(tags=["TTS"])
-"""The OpenAI speech contract, mounted at the root rather than under
-/api/v1/tts so a client written against that API needs only a base URL."""
+router = APIRouter(tags=["TTS"])
 
 
 def require_tts_enabled() -> None:
@@ -33,34 +29,11 @@ def require_tts_enabled() -> None:
         )
 
 
-@router.get("/info")
-async def info() -> dict:
-    """Static metadata about the deployed TTS model. Never touches it."""
-    return {
-        "model": settings.ACTIVE_TTS_MODEL_NAME,
-        "enabled": settings.TTS_ENABLED,
-        "language": "bn",
-        "default_voice": settings.TTS_VOICE,
-        "max_chars_per_chunk": settings.TTS_MAX_CHARS,
-    }
+async def synthesize_request(request: TtsRequest) -> JSONResponse:
+    """Send one synthesis request to LitServe and return its raw response.
 
-
-@router.get("/voices")
-async def voices() -> dict:
-    """The voices /synthesize accepts, with the style prompt each maps to.
-
-    Read locally rather than proxied: for Parler the voice list is a table of
-    prompt strings, not model state.
-    """
-    return {"voices": VOICES, "default": settings.TTS_VOICE}
-
-
-@router.post("/synthesize")
-async def synthesize(request: TtsRequest) -> JSONResponse:
-    """Text in, base64 WAV out, forwarded to LitServe's /synthesize.
-
-    Prefer this over /synthesize/audio for any client that can read base64
-    JSON; that route exists for Swagger UI and <audio> tags.
+    The voice is checked here so an unknown one fails before occupying a
+    model worker.
     """
     require_tts_enabled()
     if request.voice and request.voice not in VOICES:
@@ -73,22 +46,23 @@ async def synthesize(request: TtsRequest) -> JSONResponse:
         resp = await forward_to_litserve(
             litserve_client.synthesize(client, request.model_dump())
         )
-
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
-@router.post("/synthesize/audio")
-async def synthesize_audio(request: TtsRequest) -> Response:
-    """Same synthesis, returned as a playable audio/wav body.
+@router.post("/v1/audio/speech")
+async def audio_speech(request: TtsRequest) -> Response:
+    """OpenAI-compatible speech: text in, raw audio bytes out.
 
-    Errors pass through as JSON so a failure stays readable; only the success
-    path is binary.
+    The only TTS route, and the counterpart to POST /v1/audio/transcriptions,
+    so a client written against that API reaches this service by base URL
+    alone. "pcm" strips the WAV header, since a caller streaming into
+    telephony wants frames rather than a container.
     """
-    resp = await synthesize(request)
-    if resp.status_code >= 400:
-        return resp
+    response = await synthesize_request(request)
+    if response.status_code >= 400:
+        return response
 
-    body = json.loads(bytes(resp.body))
+    body = json.loads(bytes(response.body))
     try:
         wav = base64.b64decode(body["audioContent"], validate=True)
     except (KeyError, binascii.Error, ValueError) as exc:
@@ -97,32 +71,19 @@ async def synthesize_audio(request: TtsRequest) -> Response:
             detail="LitServe returned a malformed audio payload",
         ) from exc
 
-    return Response(
-        content=wav,
-        media_type="audio/wav",
-        headers={
-            "X-Audio-Sample-Rate": str(body.get("sampleRate", "")),
-            "X-Audio-Channels": "1",
-        },
-    )
+    if request.response_format == "wav":
+        return Response(
+            content=wav,
+            media_type="audio/wav",
+            headers={
+                "X-Audio-Sample-Rate": str(body.get("sampleRate", "")),
+                "X-Audio-Channels": "1",
+            },
+        )
 
-
-@openai_router.post("/v1/audio/speech")
-async def audio_speech(request: TtsRequest) -> Response:
-    """OpenAI-compatible speech endpoint, returning raw audio bytes.
-
-    Exists so a client already speaking that API can point at this service by
-    base URL alone. It is a thin alias over /api/v1/tts/synthesize/audio;
-    "pcm" strips the WAV header, since a caller streaming into telephony wants
-    frames rather than a container.
-    """
-    response = await synthesize_audio(request)
-    if response.status_code >= 400 or request.response_format == "wav":
-        return response
-
-    with wave.open(io.BytesIO(bytes(response.body)), "rb") as wav:
-        frames = wav.readframes(wav.getnframes())
-        rate = wav.getframerate()
+    with wave.open(io.BytesIO(wav), "rb") as container:
+        frames = container.readframes(container.getnframes())
+        rate = container.getframerate()
     return Response(
         content=frames,
         media_type="audio/pcm",
