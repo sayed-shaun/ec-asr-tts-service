@@ -705,8 +705,8 @@ def test_zipformer_does_not_warn_when_the_wheel_matches(monkeypatch):
 @pytest.mark.parametrize(
     "installed, expected",
     [
-        ("1.13.7", False),                                    # PyPI CPU wheel
-        ("1.13.5+cuda12.cudnn9.onnxruntime1.27.1", True),     # k2-fsa CUDA wheel
+        ("1.13.7", False),
+        ("1.13.5+cuda12.cudnn9.onnxruntime1.27.1", True),
     ],
 )
 def test_wheel_supports_cuda_reads_the_installed_local_version(
