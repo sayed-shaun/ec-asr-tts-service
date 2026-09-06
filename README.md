@@ -50,7 +50,7 @@ with the `ENGINE` switch and `MAX_SEGMENT_SECONDS` that existed to serve them.
 
 **Inference notes**
 
-- **Runs on CPU by default** (`ZIPFORMER_PROVIDER=cpu`). That is an onnxruntime execution provider, independent of `ACCELERATOR`: it is a property of the installed sherpa-onnx wheel. The PyPI wheel bundles a CPU-only `libonnxruntime`, so `cuda` there **silently falls back to CPU** rather than failing — using it needs a CUDA wheel from [k2-fsa's index](https://k2-fsa.github.io/sherpa/onnx/python/install.html) built against the image's CUDA/cuDNN pair
+- **Runs on GPU by default** (`ZIPFORMER_PROVIDER=cuda`). That is an onnxruntime execution provider, independent of `ACCELERATOR`: it is a property of the installed sherpa-onnx wheel, so the `litserver` image ships the CUDA wheel from [k2-fsa's index](https://k2-fsa.github.io/sherpa/onnx/cuda.html) pinned to match its CUDA/cuDNN pair. The PyPI wheel bundles a CPU-only `libonnxruntime`, so `cuda` on *that* wheel **silently falls back to CPU** rather than failing — the engine logs a warning at load when it detects the mismatch, which onnxruntime itself would not
 
   **Measured** on an RTX 2050 (4GB), 24 FLEURS clips / 340s audio, GPU otherwise idle:
 
@@ -59,18 +59,18 @@ with the `ENGINE` switch and `MAX_SEGMENT_SECONDS` that existed to serve them.
   | `cpu` | 7.59s | 0.0223 | 2.72 ms | 17.45 ms | — |
   | `cuda` | 3.88s | 0.0114 | 2.58 ms | 17.04 ms | 303 MiB |
 
-  CUDA is ~1.95x on the batch path but only ~1.06x per streaming frame — noise. CPU already decodes a 100ms frame in 2.7ms (~37x real time) and runs batch at 45x real time, so there is no latency problem to solve, and the 303 MiB matters on a card that must also hold the ~2.6GB TTS model. Revisit CUDA only for bulk offline transcription on a box where the GPU is not shared with TTS.
+  CUDA is ~1.95x on the batch `/predict` path, where `decode_streams()` runs one encoder pass across a whole batch. Per streaming frame it is only ~1.06x — noise, because the checkpoint is small enough that kernel-launch overhead rivals the compute. Neither path has a latency problem to solve: CPU already decodes a 100ms frame in 2.7ms (~37x real time). The real cost of `cuda` is the 303 MiB, on a card that may also hold the ~2.6GB TTS model.
 
-  **To A/B CUDA:** two things must change together — the wheel supplies the provider, the setting selects it.
+  The wheel and the setting move together — the wheel supplies the provider, the setting selects it — so **to fall back to CPU, change both**. The wheel is a build arg on `litserver.Dockerfile`, deliberately not an `.env` setting: nothing in compose overrides it, so a rebuild has to say so explicitly.
 
   ```bash
-  SHERPA_ONNX_CUDA_VERSION=1.13.5+cuda12.cudnn9.onnxruntime1.27.1 docker compose build litserver
-  # then set ZIPFORMER_PROVIDER=cuda in .env
+  docker compose build --build-arg SHERPA_ONNX_CUDA_VERSION=cpu litserver
+  # then set ZIPFORMER_PROVIDER=cpu in .env
   ```
 
-  Pick the exact local version from [k2-fsa's index](https://k2-fsa.github.io/sherpa/onnx/cuda.html) matching the image's CUDA/cuDNN. The CUDA wheel is monolithic (no `sherpa-onnx-core` split) but does **not** bundle cuDNN — it needs `libcudnn.so.9` from the system, which the `cudnn9` base image supplies and a slimmer base would not. If the wheel is CPU-only while `ZIPFORMER_PROVIDER=cuda`, the engine logs a warning at load — onnxruntime itself would fall back to CPU without a word.
+  The same arg takes an exact local version from [k2-fsa's index](https://k2-fsa.github.io/sherpa/onnx/cuda.html) to pin a different wheel; any replacement must match the image's CUDA/cuDNN. The CUDA wheel is monolithic (no `sherpa-onnx-core` split) but does **not** bundle CUDA or cuDNN — it dlopens `libcublasLt.so.12` / `libcudnn.so.9` through the ordinary loader.
 
-  **Where to run it:** keep `cpu` for live calls. The checkpoint is small and decodes a few hundred ms per forward pass, where kernel-launch overhead can exceed the compute, and the GPU is wanted for the autoregressive TTS model — whose latency a caller actually hears. CUDA is worth measuring on the batch `/predict` path instead, where `decode_streams()` runs one encoder pass across a whole batch
+  **This is why `litserver.Dockerfile` runs `ldconfig` over the pip `nvidia-*` lib dirs.** The `pytorch/pytorch` base ships CUDA as pip wheels under `site-packages`, not as system libraries: torch resolves those itself (so TTS needs no help), but onnxruntime's CUDA provider does not, and without the `ldconfig` step loading the recognizer dies with `libcublasLt.so.12: cannot open shared object file`. Note that this failure **raises** rather than falling back to CPU — unlike the CPU-only-wheel case, it takes the ASR worker down at startup. This is also the concrete sense in which ASR and TTS share one CUDA: both land on the same CUDA 12.x / cuDNN 9 libraries
 - Higher WER than the heavier alternatives — the trade for size, speed and streaming
 - Hallucinated text on silence/noise is filtered by `BaseASREngine.is_non_speech` (thresholds measured on this corpus)
 - Spelled-out numbers are rewritten as digits when `ITN_ENABLED` (the default) — see [`utils/itn.py`](src/utils/itn.py)
@@ -134,8 +134,8 @@ there is no second container, second port or second healthcheck to operate.
 
 The cost is that `ACCELERATOR` / `DEVICES` / `WORKERS_PER_DEVICE` are
 server-level: both checkpoints are resident on the same GPU, and each is loaded
-`WORKERS_PER_DEVICE` times. `indic-parler-tts` is ~2.6GB in bf16 (the ASR
-checkpoint costs nothing there — it runs on CPU under onnxruntime by default). If that doesn't fit, set `TTS_ENABLED=false` (the TTS
+`WORKERS_PER_DEVICE` times. `indic-parler-tts` is ~2.6GB in bf16, against
+~303 MiB for the ASR checkpoint under onnxruntime. If that doesn't fit, set `TTS_ENABLED=false` (the TTS
 routes stay mounted on the gateway and answer `503`) or split it into its own
 service.
 
@@ -219,7 +219,7 @@ Three services, from two Dockerfiles:
 | `gateway` | `fastapi.Dockerfile` | `GATEWAY_PORT` (8000) | `python:3.12-slim`, no ML deps — small, fast to build/deploy/scale independently |
 
 - `gateway` won't accept traffic until `litserver`'s healthcheck (`GET /health`) passes — no manual readiness polling needed. First request otherwise pays the checkpoint download; the `hf-cache` volume keeps it across restarts and shares it between `litserver` (`HF_HOME=/opt/cache/huggingface`).
-- GPU is on by default (`ACCELERATOR=cuda`, requires `nvidia-container-toolkit`). For CPU-only: remove the `deploy.resources` blocks from `litserver` in `docker-compose.yml` and set `ACCELERATOR=cpu`. ASR is unaffected either way — it runs under onnxruntime, on `ZIPFORMER_PROVIDER`.
+- GPU is on by default (`ACCELERATOR=cuda`, requires `nvidia-container-toolkit`). For CPU-only: remove the `deploy.resources` blocks from `litserver` in `docker-compose.yml`, set `ACCELERATOR=cpu`, and — because ASR runs under onnxruntime rather than torch — set `ZIPFORMER_PROVIDER=cpu` and rebuild with `--build-arg SHERPA_ONNX_CUDA_VERSION=cpu` as well. `ACCELERATOR` alone does not move ASR off the GPU.
 
 Run one service on its own with `docker compose up gateway litserver`.
 
@@ -320,7 +320,7 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 **Models**
 
 - `ZIPFORMER_MODEL_NAME` — the ASR checkpoint. A different repo layout also needs a `ZipformerLayout` (see [`zipformer/layouts.py`](src/litserver/zipformer/layouts.py)).
-- `ZIPFORMER_PROVIDER` — onnxruntime execution provider, `cpu` or `cuda`. Independent of `ACCELERATOR`; needs a matching wheel (see [Current Models](#current-models)).
+- `ZIPFORMER_PROVIDER` — onnxruntime execution provider, `cuda` (default) or `cpu`. Independent of `ACCELERATOR`; needs a matching wheel (see [Current Models](#current-models)).
 - `TTS_ENABLED` — **off by default.** Set `true` to mount the TTS LitAPI alongside ASR in the same LitServe process; it costs a second checkpoint's VRAM per worker. While off, ASR needs no GPU at all and `POST /v1/audio/speech` answers `503`.
 - `TTS_MODEL_NAME` / `TTS_VOICE` / `TTS_MAX_CHARS` — the TTS checkpoint, the voice used when a request names none, and the clause length text is split at before synthesis.
 - `ITN_ENABLED` — rewrite spelled-out Bengali numbers as digits. On by default; measured worth ~1.7 WER points on FLEURS.

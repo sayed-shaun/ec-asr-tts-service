@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import wave
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -644,16 +645,19 @@ def test_plain_engine_speak_stream_yields_once():
     assert len(engine.calls) == 1
 
 
-def test_zipformer_provider_defaults_to_cpu_and_is_configurable(monkeypatch):
+def test_zipformer_provider_defaults_to_cuda_and_is_configurable(monkeypatch):
     """The provider comes from ZIPFORMER_PROVIDER, not ACCELERATOR: it is a
-    property of the installed wheel, not of the device LitServe assigns."""
+    property of the installed wheel, not of the device LitServe assigns. Both
+    directions are checked, since the two settings disagreeing is exactly the
+    case that must not silently resolve to the accelerator."""
     from src.litserver.zipformer.engine import build as zipformer_build
 
-    monkeypatch.setattr(settings, "ACCELERATOR", "cuda")
-    assert zipformer_build("cuda:0").provider == "cpu"
-
-    monkeypatch.setattr(settings, "ZIPFORMER_PROVIDER", "cuda")
+    monkeypatch.setattr(settings, "ACCELERATOR", "cpu")
     assert zipformer_build("cpu").provider == "cuda"
+
+    monkeypatch.setattr(settings, "ACCELERATOR", "cuda")
+    monkeypatch.setattr(settings, "ZIPFORMER_PROVIDER", "cpu")
+    assert zipformer_build("cuda:0").provider == "cpu"
 
 
 def test_zipformer_passes_its_provider_to_the_recognizer(monkeypatch):
@@ -698,8 +702,32 @@ def test_zipformer_does_not_warn_when_the_wheel_matches(monkeypatch):
     assert not any("CPU-only" in m for m in messages)
 
 
-def test_wheel_supports_cuda_reads_the_installed_local_version():
-    """The CPU wheel here is a plain version, so this must be False."""
+@pytest.mark.parametrize(
+    "installed, expected",
+    [
+        ("1.13.7", False),                                    # PyPI CPU wheel
+        ("1.13.5+cuda12.cudnn9.onnxruntime1.27.1", True),     # k2-fsa CUDA wheel
+    ],
+)
+def test_wheel_supports_cuda_reads_the_installed_local_version(
+    monkeypatch, installed, expected
+):
+    """Both wheels are asserted rather than whichever happens to be installed:
+    this runs on dev boxes carrying the CPU wheel and inside the litserver
+    image carrying the CUDA one, and must not encode either as "the" answer."""
+    monkeypatch.setattr(
+        "src.litserver.zipformer.engine.version", lambda _: installed
+    )
+    assert ZipformerEngine.wheel_supports_cuda() is expected
+
+
+def test_wheel_supports_cuda_is_false_when_sherpa_onnx_is_absent(monkeypatch):
+    def _missing(_):
+        raise PackageNotFoundError("sherpa-onnx")
+
+    monkeypatch.setattr(
+        "src.litserver.zipformer.engine.version", _missing
+    )
     assert ZipformerEngine.wheel_supports_cuda() is False
 
 

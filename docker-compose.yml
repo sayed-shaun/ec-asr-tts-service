@@ -3,8 +3,6 @@ services:
     build:
       context: .
       dockerfile: litserver.Dockerfile
-      args:
-        SHERPA_ONNX_CUDA_VERSION: "${SHERPA_ONNX_CUDA_VERSION:-}"
     env_file:
       - .env
     environment:

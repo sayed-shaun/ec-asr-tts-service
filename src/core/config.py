@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     ZIPFORMER_MODEL_NAME: str = "alphacep/vosk-model-small-streaming-bn"
-    ZIPFORMER_PROVIDER: Literal["cpu", "cuda"] = "cpu"
+    ZIPFORMER_PROVIDER: Literal["cpu", "cuda"] = "cuda"
 
     TTS_ENABLED: bool = False
     TTS_MODEL_NAME: str = "ai4bharat/indic-parler-tts"

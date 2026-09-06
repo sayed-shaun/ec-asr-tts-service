@@ -34,11 +34,13 @@ class ZipformerEngine(BaseASREngine):
     and silently falls back, so a wrong setting costs performance rather than
     failing loudly.
 
-    "cpu" is the default deliberately. The checkpoint is small and decodes a
-    few hundred ms per forward pass, where kernel-launch overhead can exceed
-    the compute, and the GPU is wanted for the autoregressive TTS model whose
-    latency a caller actually hears. CUDA is worth measuring on the batch
-    path, where decode_streams() runs one encoder pass over many utterances.
+    "cuda" is the default: this service is only ever deployed on a GPU box,
+    and the image ships the CUDA wheel to match. The win is on the batch path,
+    where decode_streams() runs one encoder pass over many utterances (~1.95x
+    measured); per streaming frame it is noise, because the checkpoint is
+    small enough that kernel-launch overhead rivals the compute. It also costs
+    ~303 MiB of VRAM the TTS model would otherwise have, so set "cpu" (and
+    build with SHERPA_ONNX_CUDA_VERSION=cpu) on a card too tight to hold both.
 
     Which files to download is a property of the checkpoint, not of this
     engine, so it comes in as a ZipformerLayout from layouts.py alongside
@@ -55,7 +57,7 @@ class ZipformerEngine(BaseASREngine):
         tail_padding_seconds: float = 1.0,
         drop_non_speech: bool = True,
         layout: ZipformerLayout = DEFAULT,
-        provider: str = "cpu",
+        provider: str = "cuda",
         enable_endpoint_detection: bool = True,
         rule1_min_trailing_silence: float = 2.4,
         rule2_min_trailing_silence: float = 1.2,
