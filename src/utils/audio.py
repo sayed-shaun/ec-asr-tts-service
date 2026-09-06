@@ -89,22 +89,6 @@ def warm_audio_decoder(target_sr: int) -> None:
     )
 
 
-def wav_from_pcm(pcm: bytes, sample_rate: int) -> bytes:
-    """Wrap already-encoded 16-bit mono PCM in a WAV container.
-
-    The streaming path carries raw PCM per chunk, because concatenating WAV
-    files would splice a 44-byte header into the middle of the audio. Whoever
-    reassembles the stream adds the single header back here.
-    """
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm)
-    return buf.getvalue()
-
-
 def wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
     """Frame float32 mono samples as a 16-bit PCM WAV file."""
     clipped = np.clip(samples, -1.0, 1.0)

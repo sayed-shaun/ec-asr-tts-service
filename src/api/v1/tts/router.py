@@ -1,6 +1,8 @@
 import base64
 import binascii
+import io
 import json
+import wave
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, status
@@ -10,9 +12,30 @@ from src.api import client as litserve_client
 from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
 from src.litserver.parler.voices import VOICES
-from src.utils.audio import wav_from_pcm
 
 router = APIRouter(tags=["TTS"])
+
+
+def wav_from_pcm(pcm: bytes, sample_rate: int) -> bytes:
+    """Wrap already-encoded 16-bit mono PCM in a WAV container.
+
+    The streaming path carries raw PCM per chunk, because concatenating WAV
+    files would splice a 44-byte header into the middle of the audio. This
+    reassembles the single header once the whole reply is in hand.
+
+    Stdlib only, and here rather than in utils/audio.py on purpose: that
+    module imports librosa and numpy, which the gateway image deliberately
+    does not install. Importing it from this router puts a multi-GB decoding
+    stack on the gateway's import path and the container dies at startup with
+    ModuleNotFoundError.
+    """
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm)
+    return buf.getvalue()
 
 
 def require_tts_enabled() -> None:

@@ -796,6 +796,71 @@ def test_wheel_supports_cuda_is_false_when_sherpa_onnx_is_absent(monkeypatch):
     assert ZipformerEngine.wheel_supports_cuda() is False
 
 
+WORKER_ONLY_PACKAGES = {
+    "librosa",
+    "numpy",
+    "torch",
+    "soundfile",
+    "sherpa_onnx",
+    "litserve",
+    "parler_tts",
+    "transformers",
+}
+
+
+def _module_path(dotted: str) -> pathlib.Path | None:
+    """Where a `src.*` module lives on disk, or None if it is not one."""
+    if not dotted.startswith("src"):
+        return None
+    direct = pathlib.Path(dotted.replace(".", "/") + ".py")
+    package = pathlib.Path(dotted.replace(".", "/")) / "__init__.py"
+    for candidate in (direct, package):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _imports_of(path: pathlib.Path) -> set[str]:
+    import ast
+
+    imported = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    return imported
+
+
+def test_gateway_import_graph_stays_free_of_worker_dependencies():
+    """The gateway image is python:3.12-slim with the base dependencies only.
+
+    Anything main.py can reach at import time must therefore live inside that
+    set. Pulling in a worker-only module -- utils/audio.py imports librosa and
+    numpy -- does not fail a test run inside the litserver image, where those
+    exist; it fails the gateway container at startup with ModuleNotFoundError.
+    So this walks the real import graph rather than trusting a run to notice.
+    """
+    seen, queue, offenders = set(), [pathlib.Path("main.py")], {}
+    while queue:
+        path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        for dotted in _imports_of(path):
+            root = dotted.split(".")[0]
+            if root in WORKER_ONLY_PACKAGES:
+                offenders.setdefault(str(path), set()).add(dotted)
+            local = _module_path(dotted)
+            if local is not None:
+                queue.append(local)
+
+    assert not offenders, (
+        "gateway import graph reaches worker-only packages: "
+        f"{ {k: sorted(v) for k, v in offenders.items()} }"
+    )
+
+
 def test_base_module_does_not_import_torch():
     """The ASR side is pure ONNX. Importing torch in base.py would put a
     multi-GB dependency on that path for one helper only TTS uses."""
