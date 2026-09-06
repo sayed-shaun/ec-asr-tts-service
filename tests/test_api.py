@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import pathlib
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import httpx
 import numpy as np
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from loguru import logger
 from pydantic import ValidationError
@@ -317,27 +319,62 @@ def tts_lit_api():
 
 
 def test_tts_lit_api_full_cycle(tts_lit_api):
+    """One clause in, one NDJSON line of raw PCM out."""
     request = TtsRequest(input="আমি ভালো আছি।")
-    response = tts_lit_api.encode_response(
-        tts_lit_api.predict(tts_lit_api.decode_request(request))
+    lines = list(
+        tts_lit_api.encode_response(
+            tts_lit_api.predict(tts_lit_api.decode_request(request))
+        )
     )
-    assert response.taskType == "tts"
-    assert response.sampleRate == 44100
-    assert response.voice == settings.TTS_VOICE
+    assert len(lines) == 1
+    assert lines[0].endswith("\n")
 
-    wav = base64.b64decode(response.audioContent)
-    with wave.open(io.BytesIO(wav), "rb") as wf:
-        assert wf.getnchannels() == 1
-        assert wf.getsampwidth() == 2
-        assert wf.getframerate() == 44100
-        assert wf.getnframes() == 44100
+    chunk = json.loads(lines[0])
+    assert chunk["index"] == 0
+    assert chunk["sampleRate"] == 44100
+    assert chunk["voice"] == settings.TTS_VOICE
+
+    pcm = base64.b64decode(chunk["audioContent"])
+    assert len(pcm) == 44100 * 2
+
+
+def test_tts_lit_api_streams_each_clause_as_its_own_line(tts_lit_api):
+    """The point of the streaming path: a three-clause reply reaches the
+    caller as three lines, the first available before the last is generated,
+    rather than as one buffer at the end."""
+    tts_lit_api.engine = ChunkingFakeTTSEngine()
+    text = "এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।"
+    lines = list(
+        tts_lit_api.encode_response(
+            tts_lit_api.predict(tts_lit_api.decode_request(TtsRequest(input=text)))
+        )
+    )
+    assert [json.loads(line)["index"] for line in lines] == [0, 1, 2]
+
+    gap = round(0.08 * 44100)
+    sizes = [len(base64.b64decode(json.loads(line)["audioContent"])) for line in lines]
+    assert sizes == [44100 * 2, (44100 + gap) * 2, (44100 + gap) * 2]
+
+
+def test_tts_stream_concatenates_into_exactly_what_speak_returns():
+    """What lets one streaming worker serve the whole-buffer endpoint too:
+    joining the stream must reproduce speak() sample for sample, gaps and
+    all."""
+    engine = ChunkingFakeTTSEngine()
+    text = "এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।"
+    streamed = np.concatenate(
+        [part.samples for part in engine.stream_playable(text)]
+    )
+    whole = engine.speak(text).samples
+    assert streamed.size == whole.size
+    assert np.array_equal(streamed, whole)
 
 
 def test_tts_lit_api_hands_the_whole_request_to_the_engine(tts_lit_api):
     """Splitting is the engine's business now, so a plain engine sees the text
     whole and the LitAPI stays model-agnostic."""
     text = "এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।"
-    tts_lit_api.predict(tts_lit_api.decode_request(TtsRequest(input=text)))
+    list(tts_lit_api.predict(tts_lit_api.decode_request(TtsRequest(input=text))))
     assert [call[0] for call in tts_lit_api.engine.calls] == [text]
 
 
@@ -347,16 +384,16 @@ def test_chunking_engine_splits_and_joins_with_gaps():
     api = TTSLitAPI(max_batch_size=1, api_path=TTS_API_PATH)
     api.engine = ChunkingFakeTTSEngine()
     text = "এক দুই তিন। চার পাঁচ ছয়। সাত আট নয়।"
-    output = api.predict(api.decode_request(TtsRequest(input=text)))
+    parts = list(api.predict(api.decode_request(TtsRequest(input=text))))
 
     assert len(api.engine.calls) == 3
     expected = 3 * 44100 + 2 * round(0.08 * 44100)
-    assert output["audio"].samples.size == expected
+    assert sum(part["audio"].samples.size for part in parts) == expected
 
 
 def test_tts_lit_api_passes_voice_and_description_through(tts_lit_api):
     request = TtsRequest(input="পরীক্ষা।", voice="Arjun", description="  slow and calm  ")
-    tts_lit_api.predict(tts_lit_api.decode_request(request))
+    list(tts_lit_api.predict(tts_lit_api.decode_request(request)))
     assert tts_lit_api.engine.calls == [("পরীক্ষা।", "Arjun", "  slow and calm  ")]
 
 
@@ -364,8 +401,28 @@ def test_tts_lit_api_unknown_voice_is_422_not_500(tts_lit_api):
     decoded = tts_lit_api.decode_request(TtsRequest(input="পরীক্ষা।"))
     decoded["voice"] = "Nobody"
     with pytest.raises(HTTPException) as excinfo:
-        tts_lit_api.predict(decoded)
+        list(tts_lit_api.predict(decoded))
     assert excinfo.value.status_code == 422
+
+
+def test_tts_predict_is_a_generator_function(tts_lit_api):
+    """LitServe refuses to start a stream=True LitAPI unless predict itself
+    contains yield, so this shape is load-bearing, not a style choice."""
+    import inspect
+
+    assert inspect.isgeneratorfunction(type(tts_lit_api).predict)
+    assert inspect.isgeneratorfunction(type(tts_lit_api).encode_response)
+
+
+def test_tts_predict_rejects_the_voice_before_emitting_any_chunk(tts_lit_api):
+    """The check must land before the first yield: once a chunk is out the
+    response already carries a 200 and the status cannot be changed."""
+    decoded = tts_lit_api.decode_request(TtsRequest(input="পরীক্ষা।"))
+    decoded["voice"] = "Nobody"
+    stream = tts_lit_api.predict(decoded)
+    with pytest.raises(HTTPException):
+        next(stream)
+    assert tts_lit_api.engine.calls == []
 
 
 def test_tts_request_rejects_blank_input():
@@ -405,6 +462,10 @@ def test_chunker_holds_incomplete_clause_until_flush():
     assert chunker.flush() == ["বাকি অংশ"]
 
 
+FAKE_TTS_CHUNKS = 2
+FAKE_TTS_CHUNK_FRAMES = 1000
+
+
 @pytest.fixture
 def tts_client(monkeypatch):
     """A fake LitServe /synthesize, wired in through the shared client.
@@ -415,21 +476,25 @@ def tts_client(monkeypatch):
     fake = FastAPI()
 
     @fake.post(SYNTHESIZE_PATH)
-    async def synthesize(payload: dict) -> dict:
-        silence = np.zeros(1000, dtype=np.int16)
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(44100)
-            wf.writeframes(silence.tobytes())
-        return {
-            "taskType": "tts",
-            "audioContent": base64.b64encode(buf.getvalue()).decode("utf-8"),
-            "sampleRate": 44100,
-            "voice": payload.get("voice") or "Aditi",
-            "time_taken": 0.1,
-        }
+    async def synthesize(payload: dict) -> StreamingResponse:
+        """Two NDJSON chunks of raw PCM, the shape TTSLitAPI now streams."""
+
+        async def lines():
+            for index in range(FAKE_TTS_CHUNKS):
+                silence = np.zeros(FAKE_TTS_CHUNK_FRAMES, dtype="<i2")
+                yield json.dumps(
+                    {
+                        "index": index,
+                        "audioContent": base64.b64encode(
+                            silence.tobytes()
+                        ).decode("utf-8"),
+                        "sampleRate": 44100,
+                        "voice": payload.get("voice") or "Aditi",
+                        "time_taken": 0.1 * (index + 1),
+                    }
+                ) + "\n"
+
+        return StreamingResponse(lines(), media_type="application/x-ndjson")
 
     transport = httpx.ASGITransport(app=fake)
     monkeypatch.setattr(
@@ -777,6 +842,51 @@ def test_openai_speech_pcm_strips_the_wav_header(tts_client):
     assert pcm.headers["X-Audio-Sample-Rate"] == "44100"
     assert len(pcm.content) < len(wav.content)
     assert not pcm.content.startswith(b"RIFF")
+
+
+def test_speech_stream_returns_pcm_frames(tts_client):
+    """stream=true forwards the worker's clauses as they arrive, so the body
+    is the concatenated PCM with no container wrapped around it."""
+    resp = tts_client.post(
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "response_format": "pcm", "stream": True},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/pcm"
+    assert resp.headers["X-Audio-Sample-Rate"] == "44100"
+    assert not resp.content.startswith(b"RIFF")
+    assert len(resp.content) == FAKE_TTS_CHUNKS * FAKE_TTS_CHUNK_FRAMES * 2
+
+
+def test_speech_stream_and_non_stream_carry_the_same_audio(tts_client):
+    """Reassembling the stream must give byte-for-byte what the buffered call
+    returns, or the two endpoints are not the same service."""
+    streamed = tts_client.post(
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "response_format": "pcm", "stream": True},
+    )
+    buffered = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "response_format": "pcm"}
+    )
+    assert streamed.content == buffered.content
+
+
+def test_speech_stream_rejects_wav(tts_client):
+    """A WAV header states a total length that streaming does not know yet."""
+    resp = tts_client.post(
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "response_format": "wav", "stream": True},
+    )
+    assert resp.status_code == 422
+    assert "pcm" in resp.json()["detail"]
+
+
+def test_buffered_wav_covers_every_streamed_chunk(tts_client):
+    """The buffered path reassembles all chunks, not just the first."""
+    resp = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    assert resp.status_code == 200
+    with wave.open(io.BytesIO(resp.content), "rb") as wf:
+        assert wf.getnframes() == FAKE_TTS_CHUNKS * FAKE_TTS_CHUNK_FRAMES
 
 
 def test_openai_transcriptions_endpoint(asr_client):

@@ -10,6 +10,10 @@ class TtsRequest(BaseModel):
     voice: str = ""
     description: str | None = Field(default=None, max_length=1_000)
     response_format: Literal["wav", "pcm"] = "wav"
+    stream: bool = False
+    """Send each clause as soon as it is synthesized instead of the whole
+    reply at once. Requires response_format="pcm": a WAV header states the
+    total length, which is not known until the last clause is done."""
 
     @field_validator("input")
     @classmethod

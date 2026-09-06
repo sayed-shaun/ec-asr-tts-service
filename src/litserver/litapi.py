@@ -1,17 +1,19 @@
 import base64
+import json
 import time
+from collections.abc import Iterator
 
 import litserve as ls
 from fastapi import HTTPException, status
 from loguru import logger
 
 from src.api.v1.asr.schema import AsrRequest, AsrResponse, Output
-from src.api.v1.tts.schema import TtsRequest, TtsResponse
+from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
 from src.litserver.base import BaseASREngine, BaseTTSEngine
 from src.litserver.parler import engine as parler
 from src.litserver.zipformer import engine as zipformer
-from src.utils.audio import decode_base64_audio, warm_audio_decoder, wav_bytes
+from src.utils.audio import decode_base64_audio, warm_audio_decoder
 from src.utils.itn import bengali_numerals_to_digits
 
 TTS_API_PATH = "/synthesize"
@@ -81,11 +83,22 @@ class ASRLitAPI(ls.LitAPI):
 
 
 class TTSLitAPI(ls.LitAPI):
-    """Serves Bengali text-to-speech over HTTP.
+    """Serves Bengali text-to-speech over HTTP, one clause at a time.
 
     Runs in the same LitServe process as ASRLitAPI, on its own api_path and
     workers but sharing accelerator/devices/workers_per_device, so both
     checkpoints are resident on the same GPU. TTS_ENABLED=false drops it.
+
+    Always streams, even for callers that want one buffer. Parler is
+    autoregressive, so a whole reply is only finished when its last clause is;
+    emitting each clause as it lands is the difference between first audio
+    after the reply and first audio after the first clause. The gateway
+    reassembles the stream for /v1/audio/speech without `stream`, so the
+    whole-buffer contract is unchanged and only one worker pool exists.
+
+    Chunks travel as newline-delimited JSON carrying raw PCM, not WAV: WAV
+    headers cannot be concatenated, and NDJSON keeps the per-chunk metadata
+    (index, sample rate) that a reassembling caller needs.
     """
 
     def setup(self, device: str) -> None:
@@ -104,27 +117,65 @@ class TTSLitAPI(ls.LitAPI):
             "received_at": time.time(),
         }
 
-    def predict(self, x: dict) -> dict:
-        """Hand the whole request to the engine.
+    def predict(self, x: dict) -> Iterator[dict]:
+        """Validate, then hand the whole request to the engine as a stream.
 
         Whether that needs splitting into clauses is the engine's business
-        (see BaseTTSEngine.speak), so nothing here is model-specific.
+        (see BaseTTSEngine.stream_playable), so nothing here is model-specific.
+
+        Must contain `yield` rather than return a generator built elsewhere:
+        LitServe refuses to start a stream=True LitAPI whose predict is not
+        itself a generator function. The voice is therefore checked on first
+        consumption instead of at call time -- still before any chunk is
+        emitted, so a bad one cannot truncate a stream already carrying a 200,
+        and the gateway rejects it earlier anyway.
         """
+        voice = x["voice"]
+        if voice not in self.engine.voices:
+            logger.warning(f"TTS request rejected: unknown voice: {voice}")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"unknown voice: {voice}",
+            )
         try:
-            audio = self.engine.speak(x["text"], x["voice"], x["description"])
+            stream = self.engine.stream_playable(
+                x["text"], x["voice"], x["description"]
+            )
+            for index, audio in enumerate(stream):
+                yield {
+                    "audio": audio,
+                    "index": index,
+                    "voice": x["voice"],
+                    "received_at": x["received_at"],
+                }
         except ValueError as exc:
             logger.warning(f"TTS request rejected: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
             ) from exc
-        return {"audio": audio, "voice": x["voice"], "received_at": x["received_at"]}
 
-    def encode_response(self, output: dict) -> TtsResponse:
-        audio = output["audio"]
-        wav = wav_bytes(audio.samples, audio.sample_rate)
-        return TtsResponse(
-            audioContent=base64.b64encode(wav).decode("utf-8"),
-            sampleRate=audio.sample_rate,
-            voice=output["voice"],
-            time_taken=time.time() - output["received_at"],
-        )
+    def encode_response(self, outputs: Iterator[dict]):
+        """Serialize each chunk as one NDJSON line.
+
+        Deliberately unannotated: LitServe derives the route's FastAPI
+        response model from this return type, and FastAPI rejects
+        Iterator[str] as a Pydantic field ("Invalid args for response
+        field!"), refusing to register the endpoint at all.
+
+        time_taken is elapsed-so-far rather than a total, so the first line
+        reports time to first audio -- the number this streaming path exists
+        to reduce -- and the last still reports the whole request.
+        """
+        for output in outputs:
+            audio = output["audio"]
+            yield json.dumps(
+                {
+                    "index": output["index"],
+                    "audioContent": base64.b64encode(audio.pcm_s16le()).decode(
+                        "utf-8"
+                    ),
+                    "sampleRate": audio.sample_rate,
+                    "voice": output["voice"],
+                    "time_taken": time.time() - output["received_at"],
+                }
+            ) + "\n"

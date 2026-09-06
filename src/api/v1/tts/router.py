@@ -1,17 +1,16 @@
 import base64
 import binascii
-import io
 import json
-import wave
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response, StreamingResponse
 
 from src.api import client as litserve_client
-from src.api.client import forward_to_litserve
 from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
 from src.litserver.parler.voices import VOICES
+from src.utils.audio import wav_from_pcm
 
 router = APIRouter(tags=["TTS"])
 
@@ -29,11 +28,11 @@ def require_tts_enabled() -> None:
         )
 
 
-async def synthesize_request(request: TtsRequest) -> JSONResponse:
-    """Send one synthesis request to LitServe and return its raw response.
+def _validate(request: TtsRequest) -> None:
+    """Reject what can be rejected before a model worker is occupied.
 
-    The voice is checked here so an unknown one fails before occupying a
-    model worker.
+    The voice especially: checking it here means a typo costs nothing, while
+    letting it reach the worker would tie up a GPU slot to produce a 422.
     """
     require_tts_enabled()
     if request.voice and request.voice not in VOICES:
@@ -41,12 +40,49 @@ async def synthesize_request(request: TtsRequest) -> JSONResponse:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"unknown voice {request.voice!r}; choose one of {sorted(VOICES)}",
         )
-
-    async with litserve_client.get_litserve_client() as client:
-        resp = await forward_to_litserve(
-            litserve_client.synthesize(client, request.model_dump())
+    if request.stream and request.response_format != "pcm":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='stream=true requires response_format="pcm"; a WAV header '
+            "declares a total length that is unknown until the last clause",
         )
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+async def _iter_chunks(payload: dict) -> AsyncIterator[dict]:
+    """Yield LitServe's NDJSON chunks, owning the connection for their life.
+
+    The client and the response are entered here rather than by the caller
+    because a StreamingResponse outlives the handler that returns it: closing
+    either one at handler exit would truncate the audio mid-reply.
+    """
+    async with litserve_client.get_litserve_client() as client:
+        async with litserve_client.synthesize_stream(client, payload) as response:
+            if response.status_code >= 400:
+                body = await response.aread()
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=_detail(body),
+                )
+            async for line in response.aiter_lines():
+                if line.strip():
+                    yield json.loads(line)
+
+
+def _detail(body: bytes) -> str:
+    try:
+        return json.loads(body).get("detail", "TTS request failed")
+    except (json.JSONDecodeError, AttributeError):
+        return "TTS request failed"
+
+
+def _pcm(chunk: dict) -> bytes:
+    try:
+        return base64.b64decode(chunk["audioContent"], validate=True)
+    except (KeyError, binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="LitServe returned a malformed audio payload",
+        ) from exc
 
 
 @router.post("/v1/audio/speech")
@@ -57,39 +93,55 @@ async def audio_speech(request: TtsRequest) -> Response:
     so a client written against that API reaches this service by base URL
     alone. "pcm" strips the WAV header, since a caller streaming into
     telephony wants frames rather than a container.
-    """
-    response = await synthesize_request(request)
-    if response.status_code >= 400:
-        return response
 
-    body = json.loads(bytes(response.body))
+    The model worker always streams its clauses. With stream=false this
+    reassembles them into one buffer, so that contract is unchanged; with
+    stream=true they are forwarded as they arrive, which is what makes first
+    audio arrive after the first clause instead of after the whole reply.
+    """
+    _validate(request)
+
+    chunks = _iter_chunks(request.model_dump())
     try:
-        wav = base64.b64decode(body["audioContent"], validate=True)
-    except (KeyError, binascii.Error, ValueError) as exc:
+        first = await anext(chunks)
+    except StopAsyncIteration as exc:
+        await chunks.aclose()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="LitServe returned a malformed audio payload",
+            detail="LitServe produced no audio",
         ) from exc
+
+    rate = int(first.get("sampleRate", 0))
+    headers = {
+        "X-Audio-Sample-Rate": str(rate),
+        "X-Audio-Channels": "1",
+    }
+
+    if request.stream:
+
+        async def frames() -> AsyncIterator[bytes]:
+            yield _pcm(first)
+            async for chunk in chunks:
+                yield _pcm(chunk)
+
+        return StreamingResponse(
+            frames(),
+            media_type="audio/pcm",
+            headers=headers | {"X-Audio-Format": "pcm_s16le"},
+        )
+
+    pcm = bytearray(_pcm(first))
+    async for chunk in chunks:
+        pcm += _pcm(chunk)
 
     if request.response_format == "wav":
         return Response(
-            content=wav,
+            content=wav_from_pcm(bytes(pcm), rate),
             media_type="audio/wav",
-            headers={
-                "X-Audio-Sample-Rate": str(body.get("sampleRate", "")),
-                "X-Audio-Channels": "1",
-            },
+            headers=headers,
         )
-
-    with wave.open(io.BytesIO(wav), "rb") as container:
-        frames = container.readframes(container.getnframes())
-        rate = container.getframerate()
     return Response(
-        content=frames,
+        content=bytes(pcm),
         media_type="audio/pcm",
-        headers={
-            "X-Audio-Format": "pcm_s16le",
-            "X-Audio-Sample-Rate": str(rate),
-            "X-Audio-Channels": "1",
-        },
+        headers=headers | {"X-Audio-Format": "pcm_s16le"},
     )

@@ -4,6 +4,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+CHUNK_GAP_SECONDS = 0.08
+"""Silence inserted between clauses. Chunks are cut on clause boundaries, so
+joining them with no gap sounds rushed at exactly the points a speaker would
+pause."""
+
 NON_SPEECH_MAX_CHARS = 15
 NON_SPEECH_MIN_CHAR_DENSITY = 3.0
 NON_SPEECH_LITERALS = {"<>"}
@@ -118,6 +123,32 @@ class BaseTTSEngine(BaseEngine):
         """
         yield self.synthesize(text, voice, description)
 
+    def stream_playable(
+        self,
+        text: str,
+        voice: str = "",
+        description: str | None = None,
+    ) -> Iterator[Audio]:
+        """Yield the same audio as speak(), split into playback-ready pieces.
+
+        Every piece after the first carries the inter-clause gap on its front,
+        so a caller that simply concatenates the stream gets a buffer
+        identical to speak(). That is what lets one streaming worker serve
+        both the streaming and whole-buffer endpoints: the gap policy stays
+        here rather than being reimplemented by whoever reassembles.
+        """
+        gap: np.ndarray | None = None
+        for index, part in enumerate(self.speak_stream(text, voice, description)):
+            if index == 0:
+                gap = np.zeros(
+                    round(CHUNK_GAP_SECONDS * part.sample_rate), dtype=np.float32
+                )
+                yield part
+                continue
+            yield Audio(
+                np.concatenate([gap, part.samples]), part.sample_rate
+            )
+
     def speak(
         self,
         text: str,
@@ -132,7 +163,7 @@ class BaseTTSEngine(BaseEngine):
         return self.join(list(self.speak_stream(text, voice, description)))
 
     @staticmethod
-    def join(parts: list[Audio], gap_seconds: float = 0.08) -> Audio:
+    def join(parts: list[Audio], gap_seconds: float = CHUNK_GAP_SECONDS) -> Audio:
         """Concatenate per-chunk audio with a short silence between chunks.
 
         Chunks are cut on clause boundaries, so joining them with no gap

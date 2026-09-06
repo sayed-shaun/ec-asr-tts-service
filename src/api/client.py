@@ -72,6 +72,18 @@ async def transcribe_request(
     return await client.post(PREDICT_PATH, json=payload, timeout=timeout)
 
 
+def synthesize_stream(
+    client: httpx.AsyncClient, payload: dict, timeout: float = DEFAULT_TIMEOUT
+):
+    """Open a streaming POST to /synthesize, returning the context manager.
+
+    Not awaited here and not awaitable: the caller enters it to read chunks as
+    they arrive, which is the whole point. forward_to_litserve() therefore
+    cannot wrap this, so a caller handles httpx errors itself.
+    """
+    return client.stream("POST", SYNTHESIZE_PATH, json=payload, timeout=timeout)
+
+
 async def synthesize(
     client: httpx.AsyncClient, payload: dict, timeout: float = DEFAULT_TIMEOUT
 ) -> httpx.Response:

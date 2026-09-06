@@ -81,6 +81,19 @@ with the `ENGINE` switch and `MAX_SEGMENT_SECONDS` that existed to serve them.
 - **Output:** mono 44.1 kHz; the gateway hands it back as base64 WAV, a playable `audio/wav` body, or raw PCM frames
 - **Voices:** named voices map to Parler style prompts in [`parler/voices.py`](src/litserver/parler/voices.py); a request's `description` overrides the prompt with free-form style text
 - **Long text** is split on clause boundaries at `TTS_MAX_CHARS` ([`parler/chunking.py`](src/litserver/parler/chunking.py)) and rejoined with a short pause, so a long reply doesn't hit the model as one generation.
+- **The worker always streams those clauses**, as newline-delimited JSON carrying raw PCM. `POST /v1/audio/speech` with `stream=true` forwards them as they arrive, so first audio lands after the first clause instead of after the whole reply — the number that matters on a live call. Without `stream` the gateway reassembles them, and that response is byte-for-byte what the buffered path returned before, so only one worker pool exists and the old contract is unchanged. Streaming requires `response_format="pcm"`: a WAV header declares a total length nothing knows until the last clause is done.
+
+  **Measured** on an RTX 2050 (4GB), bf16, a three-clause Bengali request, median of 3:
+
+  | | time to first audio | total | RTF |
+  |---|---|---|---|
+  | buffered (before) | 10.30s | 10.30s | 1.497 |
+  | streamed | **3.88s** | 10.30s | 1.497 |
+
+  Streaming does not make generation faster — it makes the caller wait 2.7x less for the first sound. Note `RTF 1.497`: on this GPU the model generates *slower than playback*, so a client that starts playing immediately will underrun mid-utterance. Buffer before playback, or use a larger GPU.
+
+- **`torch.compile` with a static KV cache was tried and rejected.** It looks like the obvious win — batch-1 autoregressive decoding is dominated by per-step overhead — but on this stack it is measurably worse: 5.99s to first audio and RTF 1.878, against 3.88s and 1.497 without it, plus a 58.8s penalty on the first request. Clause lengths vary, so every clause is a new shape and the graph retraces, exactly as [`modeling_parler_tts.py:1666`](https://github.com/huggingface/parler-tts) warns. It also cannot run unpatched: parler-tts 0.2.2 reads `StaticCache.max_batch_size`, which transformers 4.46.1 renamed to `batch_size`, so the *second* generation onward raises `AttributeError`. Do not re-add it without re-measuring.
+- **`TTS_ATTN_IMPLEMENTATION` defaults to `auto`, which passes nothing.** That is not the same as passing a default: the checkpoint is three stacked models and transformers picks per submodule. Forcing one value applies it to all, and the T5 text encoder has no SDPA kernel in transformers 4.46 — a blanket `sdpa` fails the whole worker at load with `T5EncoderModel does not support ... scaled_dot_product_attention`.
 - **Turn it off** with `TTS_ENABLED=false` — worth doing whenever the GPU can't hold both checkpoints
 
 ---
@@ -245,7 +258,7 @@ All routes sit at the root, so a client reaches them by base URL alone.
 | | |
 |---|---|
 | `POST /v1/audio/transcriptions` | OpenAI-compatible transcription: multipart audio in, `{"text": …}` out (segments joined into one utterance) |
-| `POST /v1/audio/speech` | OpenAI-compatible speech: `{input, voice, response_format}` in, raw `wav`/`pcm` out (`pcm` strips the WAV header for telephony) |
+| `POST /v1/audio/speech` | OpenAI-compatible speech: `{input, voice, response_format, stream}` in, raw `wav`/`pcm` out (`pcm` strips the WAV header for telephony; `stream=true` sends each clause as it is synthesized and requires `pcm`) |
 | `POST /asr` | multipart upload returning `{taskType, output: [{source}], time_taken}` — the existing contract, and what the chatbot UI posts to through Caddy's `/asr*` proxy. Extra form fields such as `model_type` are ignored |
 | `GET /health` | gateway liveness — loads no model, so it answers while the model server is still warming up |
 | `GET /docs` | Swagger UI |
@@ -323,6 +336,7 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 - `ZIPFORMER_PROVIDER` — onnxruntime execution provider, `cuda` (default) or `cpu`. Independent of `ACCELERATOR`; needs a matching wheel (see [Current Models](#current-models)).
 - `TTS_ENABLED` — **off by default.** Set `true` to mount the TTS LitAPI alongside ASR in the same LitServe process; it costs a second checkpoint's VRAM per worker. While off, ASR needs no GPU at all and `POST /v1/audio/speech` answers `503`.
 - `TTS_MODEL_NAME` / `TTS_VOICE` / `TTS_MAX_CHARS` — the TTS checkpoint, the voice used when a request names none, and the clause length text is split at before synthesis.
+- `TTS_ATTN_IMPLEMENTATION` — `auto` (default, per-submodule), `eager`, or `sdpa`. See the TTS notes above before changing it; `sdpa` breaks this checkpoint's text encoder.
 - `ITN_ENABLED` — rewrite spelled-out Bengali numbers as digits. On by default; measured worth ~1.7 WER points on FLEURS.
 
 **Serving**

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     TTS_MODEL_NAME: str = "ai4bharat/indic-parler-tts"
     TTS_VOICE: str = "Aditi"
     TTS_MAX_CHARS: int = 160
+    TTS_ATTN_IMPLEMENTATION: Literal["auto", "eager", "sdpa"] = "auto"
 
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     DEVICES: Union[int, Literal["auto"]] = 1

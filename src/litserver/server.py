@@ -10,13 +10,15 @@ def create_litserve_server() -> ls.LitServer:
 
     Not the public entrypoint: the gateway reaches it over real HTTP. Two
     LitAPIs share the process, ASR on "/predict" and, when TTS_ENABLED, TTS
-    on "/synthesize". Each gets its own workers but they share
-    accelerator/devices/workers_per_device, so both checkpoints sit on the
-    same GPU. Budget for the pair, or set TTS_ENABLED=false.
+    on "/synthesize". Streaming is set per-LitAPI, so TTS emits its clauses
+    incrementally while ASR keeps answering with one response. Each gets its
+    own workers but they share accelerator/devices/workers_per_device, so both
+    checkpoints sit on the same GPU. Budget for the pair, or set
+    TTS_ENABLED=false.
     """
     apis: list[ls.LitAPI] = [ASRLitAPI(max_batch_size=1)]
     if settings.TTS_ENABLED:
-        apis.append(TTSLitAPI(max_batch_size=1, api_path=TTS_API_PATH))
+        apis.append(TTSLitAPI(max_batch_size=1, api_path=TTS_API_PATH, stream=True))
     else:
         logger.info("TTS_ENABLED=false — serving ASR only")
 

@@ -20,6 +20,7 @@ def build(device: str) -> "ParlerTTSEngine":
         device=device,
         default_voice=settings.TTS_VOICE,
         max_chars=settings.TTS_MAX_CHARS,
+        attn_implementation=settings.TTS_ATTN_IMPLEMENTATION,
     )
 
 
@@ -54,11 +55,13 @@ class ParlerTTSEngine(BaseTTSEngine):
         device: str = "auto",
         default_voice: str = DEFAULT_VOICE,
         max_chars: int = 160,
+        attn_implementation: str = "auto",
     ):
         self.model_name = model_name
         self.device = self.resolve_device(device)
         self.default_voice = default_voice
         self.max_chars = max_chars
+        self.attn_implementation = attn_implementation
         self.sample_rate = 0
         self.model = None
         self.prompt_tokenizer = None
@@ -83,7 +86,7 @@ class ParlerTTSEngine(BaseTTSEngine):
         dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
 
         model = ParlerTTSForConditionalGeneration.from_pretrained(
-            self.model_name, torch_dtype=dtype
+            self.model_name, torch_dtype=dtype, **self._attn_kwargs()
         )
         self.model = model.to(self.device).eval()
         self.prompt_tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -100,6 +103,24 @@ class ParlerTTSEngine(BaseTTSEngine):
                 logger.warning(f"Parler TTS warmup failed (continuing anyway): {exc}")
 
         logger.info(f"Parler TTS model loaded (sample_rate={self.sample_rate})")
+
+    def _attn_kwargs(self) -> dict:
+        """How to ask for an attention implementation, or not to ask at all.
+
+        "auto" passes nothing, which is not the same as passing a default:
+        this checkpoint is three stacked models, and transformers then picks
+        per submodule. Forcing one value applies it to all of them, and the T5
+        text encoder has no SDPA kernel in transformers 4.46 -- from_pretrained
+        raises "T5EncoderModel does not support an attention implementation
+        through torch.nn.functional.scaled_dot_product_attention yet", so a
+        blanket "sdpa" takes the whole worker down at load.
+
+        The override is kept for pinning a checkpoint whose submodules all
+        agree, and for reproducing a measurement.
+        """
+        if self.attn_implementation == "auto":
+            return {}
+        return {"attn_implementation": self.attn_implementation}
 
     def synthesize(
         self,
