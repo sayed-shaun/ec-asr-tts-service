@@ -472,8 +472,8 @@ FAKE_TTS_CHUNK_FRAMES = 1000
 def tts_client(monkeypatch):
     """A fake LitServe /synthesize, wired in through the shared client.
 
-    TTS_ENABLED is off by default, so the fixture opts in the way a deployment
-    that wants TTS does."""
+    Pins TTS_ENABLED rather than trusting the default, so these tests keep
+    testing the enabled path whichever way that default is set."""
     monkeypatch.setattr(settings, "TTS_ENABLED", True)
     speech_cache.clear()
     fake = FastAPI()
