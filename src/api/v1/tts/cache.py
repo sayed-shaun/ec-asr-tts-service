@@ -18,6 +18,17 @@ replays the clauses in order, `stream=false` joins them, and
 would force the streaming path to re-split it, and storing per-format would
 hold the same audio two or three times over.
 
+What gets stored is the router's decision, not this module's: a reply is
+kept only when the caller marked it reusable with a `tag`. The key stays the
+text regardless. That split matters -- keying on the tag was tried and
+rejected. A tag names an answer whose wording upstream is free to edit, and
+this service's dataset is mostly fees and dates on a refresh timer, so a
+tag-keyed entry would keep speaking last week's number with no deploy and no
+error anywhere. Keying on the text means an upstream edit simply changes the
+key: the stale entry is never served again and ages out. The failure mode of
+the wrong key is silence about wrong audio; the failure mode of the right one
+is a cache miss.
+
 One consequence worth stating: generation samples, so the same text
 synthesized twice is already two slightly different recordings today. A hit
 replays the one that was cached, which makes repeat requests consistent
@@ -80,7 +91,11 @@ class SpeechCache:
 
         `response_format` and `stream` are deliberately absent: both are
         rendering decisions the router makes from the same stored PCM, so
-        including them would store the same audio under several keys.
+        including them would store the same audio under several keys. A
+        caller's `tag` is absent too, and deliberately so -- it decides
+        whether a reply is worth keeping, never which recording answers a
+        request. See this module's docstring for why that separation is
+        load-bearing.
 
         Hashed rather than tupled so an entry costs a 64-character key
         instead of holding a caller's full 20,000-character input alive for

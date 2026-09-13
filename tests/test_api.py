@@ -1046,7 +1046,7 @@ def test_asr_route_no_longer_accepts_a_file_upload(asr_client):
 
 def test_tts_repeat_request_is_served_from_cache(tts_client):
     """The point of the cache: the same text twice occupies the GPU once."""
-    body = {"input": "হ্যালো"}
+    body = {"input": "হ্যালো", "tag": "greeting"}
     first = tts_client.post("/v1/audio/speech", json=body)
     second = tts_client.post("/v1/audio/speech", json=body)
 
@@ -1060,15 +1060,17 @@ def test_tts_cache_is_keyed_on_voice_and_description(tts_client):
     """Same text, different delivery, is different audio and must not share
     an entry -- the failure would be a caller asking for one voice and
     getting whichever one was cached first."""
-    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
-    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো", "voice": "Arjun"})
+    tag = {"tag": "greeting"}
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"} | tag)
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো", "voice": "Arjun"} | tag)
     tts_client.post(
-        "/v1/audio/speech", json={"input": "হ্যালো", "description": "slow and calm"}
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "description": "slow and calm"} | tag,
     )
     assert len(tts_client.synthesize_calls) == 3
 
     repeat = tts_client.post(
-        "/v1/audio/speech", json={"input": "হ্যালো", "voice": "Arjun"}
+        "/v1/audio/speech", json={"input": "হ্যালো", "voice": "Arjun"} | tag
     )
     assert repeat.headers["x-cache"] == "HIT"
     assert len(tts_client.synthesize_calls) == 3
@@ -1079,9 +1081,10 @@ def test_tts_cache_treats_the_default_voice_and_an_explicit_one_as_one_entry(
 ):
     """A caller who names the configured default is asking for the audio an
     omitted voice already produced."""
-    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো", "tag": "greeting"})
     explicit = tts_client.post(
-        "/v1/audio/speech", json={"input": "হ্যালো", "voice": settings.TTS_VOICE}
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "voice": settings.TTS_VOICE, "tag": "greeting"},
     )
     assert explicit.headers["x-cache"] == "HIT"
     assert len(tts_client.synthesize_calls) == 1
@@ -1090,9 +1093,12 @@ def test_tts_cache_treats_the_default_voice_and_an_explicit_one_as_one_entry(
 def test_tts_cache_serves_every_format_from_one_synthesis(tts_client):
     """WAV and PCM are the same audio with and without a 44-byte header, so
     the second format is a rendering decision, not a second GPU call."""
-    wav = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    wav = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "tag": "greeting"}
+    )
     pcm = tts_client.post(
-        "/v1/audio/speech", json={"input": "হ্যালো", "response_format": "pcm"}
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "response_format": "pcm", "tag": "greeting"},
     )
     assert pcm.headers["x-cache"] == "HIT"
     assert len(tts_client.synthesize_calls) == 1
@@ -1107,7 +1113,12 @@ def test_tts_cache_hit_still_streams_the_same_bytes(tts_client):
     framing, so where the reply is split is the transport's business and no
     caller can depend on it.
     """
-    body = {"input": "হ্যালো", "stream": True, "response_format": "pcm"}
+    body = {
+        "input": "হ্যালো",
+        "stream": True,
+        "response_format": "pcm",
+        "tag": "greeting",
+    }
     with tts_client.stream("POST", "/v1/audio/speech", json=body) as live:
         assert live.headers["x-cache"] == "MISS"
         fresh = b"".join(live.iter_raw())
@@ -1126,12 +1137,18 @@ def test_tts_streamed_reply_is_cached_for_the_buffered_endpoint(tts_client):
     with tts_client.stream(
         "POST",
         "/v1/audio/speech",
-        json={"input": "হ্যালো", "stream": True, "response_format": "pcm"},
+        json={
+            "input": "হ্যালো",
+            "stream": True,
+            "response_format": "pcm",
+            "tag": "greeting",
+        },
     ) as live:
         streamed = b"".join(live.iter_raw())
 
     buffered = tts_client.post(
-        "/v1/audio/speech", json={"input": "হ্যালো", "response_format": "pcm"}
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "response_format": "pcm", "tag": "greeting"},
     )
     assert buffered.headers["x-cache"] == "HIT"
     assert buffered.content == streamed
@@ -1276,3 +1293,94 @@ def test_cache_cap_setting_is_mib_converted_to_bytes_once():
     conversion lives in config so no caller has to remember which unit it
     is holding."""
     assert settings.TTS_CACHE_MAX_BYTES == settings.TTS_CACHE_MAX_MB * 1024 * 1024
+
+
+def test_tts_only_tagged_replies_are_cached(tts_client):
+    """The reason the tag exists: a generated answer is new wording every
+    time, so caching it evicts canned answers that are asked constantly."""
+    tts_client.post("/v1/audio/speech", json={"input": "উত্তর এক"})
+    again = tts_client.post("/v1/audio/speech", json={"input": "উত্তর এক"})
+
+    assert again.headers["x-cache"] == "MISS"
+    assert len(tts_client.synthesize_calls) == 2
+    assert speech_cache.stats()["entries"] == 0
+
+
+def test_tts_tagged_reply_is_cached(tts_client):
+    body = {"input": "উত্তর এক", "tag": "accepted_nid_types"}
+    tts_client.post("/v1/audio/speech", json=body)
+    again = tts_client.post("/v1/audio/speech", json=body)
+
+    assert again.headers["x-cache"] == "HIT"
+    assert len(tts_client.synthesize_calls) == 1
+
+
+def test_tts_blank_tag_counts_as_untagged(tts_client):
+    """A caller sending "" means the same as sending nothing; trusting them
+    to omit the key would make an empty string cache everything."""
+    for tag in ("", "   "):
+        speech_cache.clear()
+        tts_client.synthesize_calls.clear()
+        body = {"input": "উত্তর এক", "tag": tag}
+        tts_client.post("/v1/audio/speech", json=body)
+        again = tts_client.post("/v1/audio/speech", json=body)
+        assert again.headers["x-cache"] == "MISS", tag
+        assert len(tts_client.synthesize_calls) == 2, tag
+
+
+def test_tts_tag_changes_nothing_about_which_entry_answers(tts_client):
+    """The tag gates the write; the text is the key. Same words under two
+    tags is one recording, which is what dedupes a dataset whose tags share
+    answers."""
+    tts_client.post("/v1/audio/speech", json={"input": "একই কথা", "tag": "tag_a"})
+    other = tts_client.post(
+        "/v1/audio/speech", json={"input": "একই কথা", "tag": "tag_b"}
+    )
+
+    assert other.headers["x-cache"] == "HIT"
+    assert len(tts_client.synthesize_calls) == 1
+    assert speech_cache.stats()["entries"] == 1
+
+
+def test_tts_untagged_request_may_still_read_a_cached_reply(tts_client):
+    """Gating the write but not the read: the key is the text, so a hit is
+    the right audio for whoever asks. Refusing it would re-synthesize
+    something already in hand."""
+    tts_client.post("/v1/audio/speech", json={"input": "একই কথা", "tag": "tag_a"})
+    untagged = tts_client.post("/v1/audio/speech", json={"input": "একই কথা"})
+
+    assert untagged.headers["x-cache"] == "HIT"
+    assert len(tts_client.synthesize_calls) == 1
+
+
+def test_tts_edited_answer_under_one_tag_never_serves_the_old_audio(tts_client):
+    """The case that decided the design: the dataset is fees and dates on a
+    refresh timer, so the text behind a tag changes with no deploy. Keying on
+    the tag would keep speaking the old number."""
+    fee = "ফি দুইশ ত্রিশ টাকা"
+    tts_client.post("/v1/audio/speech", json={"input": fee, "tag": "card_fees"})
+
+    edited = "ফি দুইশ পঞ্চাশ টাকা"
+    resp = tts_client.post(
+        "/v1/audio/speech", json={"input": edited, "tag": "card_fees"}
+    )
+
+    assert resp.headers["x-cache"] == "MISS"
+    assert len(tts_client.synthesize_calls) == 2
+
+
+def test_tts_tagged_streamed_reply_is_cached_but_untagged_is_not(tts_client):
+    """The gate has to hold on the streaming path too, where the store
+    happens inside the response generator."""
+    def stream(body):
+        with tts_client.stream("POST", "/v1/audio/speech", json=body) as resp:
+            return b"".join(resp.iter_raw()), resp.headers["x-cache"]
+
+    plain = {"input": "উত্তর এক", "stream": True, "response_format": "pcm"}
+    stream(plain)
+    assert stream(plain)[1] == "MISS"
+    assert speech_cache.stats()["entries"] == 0
+
+    tagged = plain | {"tag": "accepted_nid_types"}
+    stream(tagged)
+    assert stream(tagged)[1] == "HIT"

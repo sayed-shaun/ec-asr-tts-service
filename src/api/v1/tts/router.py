@@ -194,12 +194,25 @@ async def audio_speech(request: TtsRequest) -> Response:
     format and streaming mode this caller asked for. Validation still runs
     first, so a bad voice is still a 422 and a disabled service still a 503
     rather than a hit on something cached while it was enabled.
+
+    A `tag` marks the reply as one the caller expects to need again -- a
+    canned answer rather than a generated one -- and only tagged replies are
+    stored. An untagged reply is new wording every time, so caching it fills
+    the cache with entries that will never be read and evicts the ones that
+    would have been.
+
+    The tag gates the write only. Lookups stay open to everyone, because the
+    key is the text: a hit is the right audio for whoever asks, so an
+    untagged reply that happens to repeat a tagged one is served free rather
+    than re-synthesized for nothing.
     """
     _validate(request)
 
     key = speech_cache.key(
         request.input, request.voice or settings.TTS_VOICE, request.description
     )
+    reusable = bool(request.tag and request.tag.strip())
+
     hit = speech_cache.get(key)
     if hit is not None:
         if request.stream:
@@ -236,13 +249,15 @@ async def audio_speech(request: TtsRequest) -> Response:
                 part = _pcm(chunk)
                 collected.append(part)
                 yield part
-            speech_cache.put(key, rate, collected)
+            if reusable:
+                speech_cache.put(key, rate, collected)
 
         return _streaming_response(frames(), rate, cached=False)
 
     parts = [_pcm(first)]
     async for chunk in chunks:
         parts.append(_pcm(chunk))
-    speech_cache.put(key, rate, parts)
+    if reusable:
+        speech_cache.put(key, rate, parts)
 
     return _buffered_response(request, rate, parts, cached=False)

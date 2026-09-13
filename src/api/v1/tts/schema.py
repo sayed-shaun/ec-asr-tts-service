@@ -9,6 +9,20 @@ class TtsRequest(BaseModel):
     input: str = Field(..., min_length=1, max_length=20_000)
     voice: str = ""
     description: str | None = Field(default=None, max_length=1_000)
+    tag: str | None = Field(default=None, max_length=200)
+    """Mark this reply as one worth keeping: send the knowledge-base tag it
+    came from, and omit it for anything generated per request.
+
+    Only tagged replies are cached. A generated answer is new wording every
+    time, so storing it fills a bounded cache with entries nothing will ever
+    ask for again, evicting the canned answers that are asked constantly.
+
+    The tag is not the cache key -- the text is -- so it is safe to send even
+    when the answer behind a tag is edited upstream: the text changes, the
+    key changes, and the old audio is simply never served again. Sending it
+    is a hint about reuse, never an assertion about wording.
+    """
+
     response_format: Literal["wav", "pcm"] = "wav"
     stream: bool = False
     """Send each clause as soon as it is synthesized instead of the whole
