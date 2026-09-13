@@ -94,6 +94,9 @@ with the `ENGINE` switch and `MAX_SEGMENT_SECONDS` that existed to serve them.
 
 - **`torch.compile` with a static KV cache was tried and rejected.** It looks like the obvious win — batch-1 autoregressive decoding is dominated by per-step overhead — but on this stack it is measurably worse: 5.99s to first audio and RTF 1.878, against 3.88s and 1.497 without it, plus a 58.8s penalty on the first request. Clause lengths vary, so every clause is a new shape and the graph retraces, exactly as [`modeling_parler_tts.py:1666`](https://github.com/huggingface/parler-tts) warns. It also cannot run unpatched: parler-tts 0.2.2 reads `StaticCache.max_batch_size`, which transformers 4.46.1 renamed to `batch_size`, so the *second* generation onward raises `AttributeError`. Do not re-add it without re-measuring.
 - **`TTS_ATTN_IMPLEMENTATION` defaults to `auto`, which passes nothing.** That is not the same as passing a default: the checkpoint is three stacked models and transformers picks per submodule. Forcing one value applies it to all, and the T5 text encoder has no SDPA kernel in transformers 4.46 — a blanket `sdpa` fails the whole worker at load with `T5EncoderModel does not support ... scaled_dot_product_attention`.
+- **Repeat text is answered from a cache in the gateway**, never by the model ([`tts/cache.py`](src/api/v1/tts/cache.py)). Generation is autoregressive and costs a worker slot for seconds, while real TTS traffic is mostly repeats — prompts, confirmations, error messages — so the same sentence twice is a GPU call the service should not make. Entries are keyed on `(input, voice, description)` and hold the per-clause PCM the worker streamed, so one entry serves `stream=true`, `stream=false`, `wav` and `pcm` alike; `response_format` and `stream` are rendering decisions, not part of the key. Responses carry `X-Cache: HIT` or `MISS`, which is the only way a caller timing the endpoint can tell a fast model from a cache hit.
+
+  Bounded by total audio (`TTS_CACHE_MAX_MB`, default 1024 ≈ 3.4 hours) rather than entry count, because replies range from ~50 KB to tens of MB; the coldest entry is evicted first. It is per-process and unreplicated, so a restart or a second gateway replica just means more misses — a latency optimization, never a correctness guarantee. Two things follow from it being a replay: generation samples, so a hit returns the one recording that was cached rather than a fresh take, which makes repeats consistent as well as instant; and a stream a client abandons mid-reply is not stored, so nobody is served truncated audio. `TTS_CACHE_ENABLED=false` synthesizes every request.
 - **Turn it off** with `TTS_ENABLED=false` — worth doing whenever the GPU can't hold both checkpoints
 
 ---
@@ -195,6 +198,7 @@ service.
 │           ├── asr/router.py      # POST /asr and /v1/audio/transcriptions
 │           ├── asr/schema.py      # request/response models
 │           ├── tts/router.py      # POST /v1/audio/speech
+│           ├── tts/cache.py       # replay already-synthesized speech, keyed by text+voice
 │           └── tts/schema.py      # request/response models
 ├── tests/test_api.py              # unit tests (models mocked)
 └── scripts/
@@ -258,9 +262,9 @@ All routes sit at the root, so a client reaches them by base URL alone.
 | | |
 |---|---|
 | `POST /v1/audio/transcriptions` | OpenAI-compatible transcription: multipart audio in, `{"text": …}` out (segments joined into one utterance) |
-| `POST /v1/audio/speech` | OpenAI-compatible speech: `{input, voice, response_format, stream}` in, raw `wav`/`pcm` out (`pcm` strips the WAV header for telephony; `stream=true` sends each clause as it is synthesized and requires `pcm`) |
+| `POST /v1/audio/speech` | OpenAI-compatible speech: `{input, voice, response_format, stream}` in, raw `wav`/`pcm` out (`pcm` strips the WAV header for telephony; `stream=true` sends each clause as it is synthesized and requires `pcm`). Text already synthesized for the same voice and description is replayed from cache — `X-Cache: HIT`/`MISS` says which |
 | `POST /asr` | multipart upload returning `{taskType, output: [{source}], time_taken}` — the existing contract, and what the chatbot UI posts to through Caddy's `/asr*` proxy. Extra form fields such as `model_type` are ignored |
-| `GET /health` | gateway liveness — loads no model, so it answers while the model server is still warming up |
+| `GET /health` | gateway liveness — loads no model, so it answers while the model server is still warming up. Also reports `tts_cache` counters (hits, misses, evictions, MiB used), which is how `TTS_CACHE_MAX_MB` gets sized from data rather than guessed |
 | `GET /docs` | Swagger UI |
 
 **LitServe** (`run_litserve.py`, internal only — no host port published):
@@ -337,6 +341,9 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 - `TTS_ENABLED` — **off by default.** Set `true` to mount the TTS LitAPI alongside ASR in the same LitServe process; it costs a second checkpoint's VRAM per worker. While off, ASR needs no GPU at all and `POST /v1/audio/speech` answers `503`.
 - `TTS_MODEL_NAME` / `TTS_VOICE` / `TTS_MAX_CHARS` — the TTS checkpoint, the voice used when a request names none, and the clause length text is split at before synthesis.
 - `TTS_ATTN_IMPLEMENTATION` — `auto` (default, per-submodule), `eager`, or `sdpa`. See the TTS notes above before changing it; `sdpa` breaks this checkpoint's text encoder.
+- `TTS_CACHE_ENABLED` / `TTS_CACHE_MAX_MB` — whether the gateway replays already-synthesized speech instead of calling the model, and how much audio it keeps to do so, in MiB (default on, 1024 ≈ 3,000 four-second prompts). It is a ceiling, not an allocation — the gateway grows into it only as distinct text arrives. See the TTS notes above.
+
+  **Sizing it:** `GET /health` reports `tts_cache`. Raise `TTS_CACHE_MAX_MB` when `evictions` is climbing — that is the working set not fitting. A poor hit rate with *zero* evictions means the text itself rarely repeats, which no cap fixes. The cap is per gateway **process**, so N uvicorn workers or N replicas hold N caches; budget the container limit accordingly.
 - `ITN_ENABLED` — rewrite spelled-out Bengali numbers as digits. On by default; measured worth ~1.7 WER points on FLEURS.
 
 **Serving**

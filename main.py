@@ -8,6 +8,7 @@ from loguru import logger
 
 from src.api.v1.asr.router import router as asr_router
 from src.api.v1.tts.router import router as tts_router
+from src.api.v1.tts.router import speech_cache
 from src.core.config import settings
 from src.core.logging import configure_logging
 
@@ -51,9 +52,16 @@ def create_gateway_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict:
         """Liveness for the gateway itself. Loads no model, so it answers even
-        while the model server is still warming up."""
+        while the model server is still warming up.
+
+        Carries the speech cache counters because sizing TTS_CACHE_MAX_MB
+        is guesswork without them: `evictions` is what says the cap is too
+        small, and a hit rate with none of them says the text simply does not
+        repeat, which a larger cap cannot fix.
+        """
         return {"status": "ok", "asr": settings.ACTIVE_MODEL_NAME,
-                "tts": settings.ACTIVE_TTS_MODEL_NAME}
+                "tts": settings.ACTIVE_TTS_MODEL_NAME,
+                "tts_cache": speech_cache.stats()}
 
     app.include_router(asr_router)
     app.include_router(tts_router)
