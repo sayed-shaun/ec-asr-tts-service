@@ -12,10 +12,14 @@ class Settings(BaseSettings):
     ZIPFORMER_PROVIDER: Literal["cpu", "cuda"] = "cuda"
 
     TTS_ENABLED: bool = False
+
     TTS_MODEL_NAME: str = "ai4bharat/indic-parler-tts"
     TTS_VOICE: str = "Aditi"
     TTS_MAX_CHARS: int = 160
     TTS_ATTN_IMPLEMENTATION: Literal["auto", "eager", "sdpa"] = "auto"
+
+    TTS_CACHE_ENABLED: bool = True
+    TTS_CACHE_MAX_MB: int = 1024
 
     ACCELERATOR: Literal["cpu", "cuda"] = "cuda"
     DEVICES: Union[int, Literal["auto"]] = 1
@@ -35,6 +39,11 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
+
+    @property
+    def TTS_CACHE_MAX_BYTES(self) -> int:
+        """The MiB knob in the bytes the cache actually counts."""
+        return self.TTS_CACHE_MAX_MB * 1024 * 1024
 
     @property
     def ACTIVE_MODEL_NAME(self) -> str:

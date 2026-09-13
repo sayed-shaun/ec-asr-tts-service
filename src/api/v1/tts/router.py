@@ -9,11 +9,22 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
 
 from src.api import client as litserve_client
+from src.api.v1.tts.cache import SpeechCache
 from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
 from src.litserver.parler.voices import VOICES
 
 router = APIRouter(tags=["TTS"])
+
+speech_cache = SpeechCache(
+    max_bytes=settings.TTS_CACHE_MAX_BYTES,
+    enabled=settings.TTS_CACHE_ENABLED,
+)
+"""One cache for the process, shared by every request this router serves.
+
+Module-level on purpose: a per-request or per-app instance would be empty
+on arrival, which is the one thing a cache must not be.
+"""
 
 
 def wav_from_pcm(pcm: bytes, sample_rate: int) -> bytes:
@@ -108,6 +119,62 @@ def _pcm(chunk: dict) -> bytes:
         ) from exc
 
 
+def _headers(rate: int, *, cached: bool) -> dict:
+    """Common audio headers, plus whether the model ran for this request.
+
+    X-Cache is worth the line: without it a caller measuring latency cannot
+    tell a fast model from a cache hit, and neither can anyone reading this
+    service's traces.
+    """
+    return {
+        "X-Audio-Sample-Rate": str(rate),
+        "X-Audio-Channels": "1",
+        "X-Cache": "HIT" if cached else "MISS",
+    }
+
+
+def _buffered_response(
+    request: TtsRequest, rate: int, parts: list[bytes], *, cached: bool
+) -> Response:
+    """Join the clauses into the single body a non-streaming caller asked for."""
+    pcm = b"".join(parts)
+    headers = _headers(rate, cached=cached)
+    if request.response_format == "wav":
+        return Response(
+            content=wav_from_pcm(pcm, rate),
+            media_type="audio/wav",
+            headers=headers,
+        )
+    return Response(
+        content=pcm,
+        media_type="audio/pcm",
+        headers=headers | {"X-Audio-Format": "pcm_s16le"},
+    )
+
+
+def _streaming_response(
+    frames: AsyncIterator[bytes], rate: int, *, cached: bool
+) -> StreamingResponse:
+    return StreamingResponse(
+        frames,
+        media_type="audio/pcm",
+        headers=_headers(rate, cached=cached) | {"X-Audio-Format": "pcm_s16le"},
+    )
+
+
+async def _replay(parts: tuple[bytes, ...]) -> AsyncIterator[bytes]:
+    """Hand a cached reply back clause by clause.
+
+    Yielding the parts rather than one joined buffer keeps the replay on the
+    same shape the miss path emits, so both modes go through one code path
+    and a hit stays a stream rather than a single buffer wearing a streaming
+    content type. Where those bytes land in TCP segments is the transport's
+    business either way: raw PCM carries no framing for a caller to depend on.
+    """
+    for part in parts:
+        yield part
+
+
 @router.post("/v1/audio/speech")
 async def audio_speech(request: TtsRequest) -> Response:
     """OpenAI-compatible speech: text in, raw audio bytes out.
@@ -121,8 +188,25 @@ async def audio_speech(request: TtsRequest) -> Response:
     reassembles them into one buffer, so that contract is unchanged; with
     stream=true they are forwarded as they arrive, which is what makes first
     audio arrive after the first clause instead of after the whole reply.
+
+    Text already synthesized for the same voice and description is answered
+    from src.api.v1.tts.cache without touching the model at all, in whichever
+    format and streaming mode this caller asked for. Validation still runs
+    first, so a bad voice is still a 422 and a disabled service still a 503
+    rather than a hit on something cached while it was enabled.
     """
     _validate(request)
+
+    key = speech_cache.key(
+        request.input, request.voice or settings.TTS_VOICE, request.description
+    )
+    hit = speech_cache.get(key)
+    if hit is not None:
+        if request.stream:
+            return _streaming_response(_replay(hit.parts), hit.sample_rate, cached=True)
+        return _buffered_response(
+            request, hit.sample_rate, list(hit.parts), cached=True
+        )
 
     chunks = _iter_chunks(request.model_dump())
     try:
@@ -135,36 +219,30 @@ async def audio_speech(request: TtsRequest) -> Response:
         ) from exc
 
     rate = int(first.get("sampleRate", 0))
-    headers = {
-        "X-Audio-Sample-Rate": str(rate),
-        "X-Audio-Channels": "1",
-    }
 
     if request.stream:
 
         async def frames() -> AsyncIterator[bytes]:
-            yield _pcm(first)
+            """Forward each clause and keep a copy for the cache.
+
+            The store happens only after the source iterator is exhausted.
+            A client that hangs up mid-reply leaves this generator closed
+            partway through, and caching what it had read would serve that
+            truncated audio to everyone who asked for the same text next.
+            """
+            collected = [_pcm(first)]
+            yield collected[0]
             async for chunk in chunks:
-                yield _pcm(chunk)
+                part = _pcm(chunk)
+                collected.append(part)
+                yield part
+            speech_cache.put(key, rate, collected)
 
-        return StreamingResponse(
-            frames(),
-            media_type="audio/pcm",
-            headers=headers | {"X-Audio-Format": "pcm_s16le"},
-        )
+        return _streaming_response(frames(), rate, cached=False)
 
-    pcm = bytearray(_pcm(first))
+    parts = [_pcm(first)]
     async for chunk in chunks:
-        pcm += _pcm(chunk)
+        parts.append(_pcm(chunk))
+    speech_cache.put(key, rate, parts)
 
-    if request.response_format == "wav":
-        return Response(
-            content=wav_from_pcm(bytes(pcm), rate),
-            media_type="audio/wav",
-            headers=headers,
-        )
-    return Response(
-        content=bytes(pcm),
-        media_type="audio/pcm",
-        headers=headers | {"X-Audio-Format": "pcm_s16le"},
-    )
+    return _buffered_response(request, rate, parts, cached=False)

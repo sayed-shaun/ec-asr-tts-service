@@ -22,7 +22,9 @@ from pydantic import ValidationError
 from main import create_gateway_app
 from src.api.client import PREDICT_PATH, SYNTHESIZE_PATH
 from src.api.v1.asr.schema import AsrRequest
+from src.api.v1.tts.cache import SpeechCache
 from src.api.v1.tts.router import router as tts_router
+from src.api.v1.tts.router import speech_cache
 from src.api.v1.tts.schema import TtsRequest
 from src.core.config import settings
 from src.litserver.base import Audio, BaseTTSEngine
@@ -473,11 +475,14 @@ def tts_client(monkeypatch):
     TTS_ENABLED is off by default, so the fixture opts in the way a deployment
     that wants TTS does."""
     monkeypatch.setattr(settings, "TTS_ENABLED", True)
+    speech_cache.clear()
     fake = FastAPI()
+    calls: list[dict] = []
 
     @fake.post(SYNTHESIZE_PATH)
     async def synthesize(payload: dict) -> StreamingResponse:
         """Two NDJSON chunks of raw PCM, the shape TTSLitAPI now streams."""
+        calls.append(payload)
 
         async def lines():
             for index in range(FAKE_TTS_CHUNKS):
@@ -503,7 +508,11 @@ def tts_client(monkeypatch):
     )
     app = FastAPI()
     app.include_router(tts_router)
-    return TestClient(app)
+    client = TestClient(app)
+    client.synthesize_calls = calls
+    """Every payload the model server was asked to synthesize, so a test can
+    assert that a second identical request never reached it."""
+    return client
 
 
 def test_tts_synthesize_audio_endpoint_returns_playable_wav(tts_client):
@@ -1033,3 +1042,237 @@ def test_asr_route_no_longer_accepts_a_file_upload(asr_client):
         "/asr", files={"file": ("recording.webm", wav, "audio/webm")}
     )
     assert resp.status_code == 422
+
+
+def test_tts_repeat_request_is_served_from_cache(tts_client):
+    """The point of the cache: the same text twice occupies the GPU once."""
+    body = {"input": "হ্যালো"}
+    first = tts_client.post("/v1/audio/speech", json=body)
+    second = tts_client.post("/v1/audio/speech", json=body)
+
+    assert first.headers["x-cache"] == "MISS"
+    assert second.headers["x-cache"] == "HIT"
+    assert second.content == first.content
+    assert len(tts_client.synthesize_calls) == 1
+
+
+def test_tts_cache_is_keyed_on_voice_and_description(tts_client):
+    """Same text, different delivery, is different audio and must not share
+    an entry -- the failure would be a caller asking for one voice and
+    getting whichever one was cached first."""
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো", "voice": "Arjun"})
+    tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "description": "slow and calm"}
+    )
+    assert len(tts_client.synthesize_calls) == 3
+
+    repeat = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "voice": "Arjun"}
+    )
+    assert repeat.headers["x-cache"] == "HIT"
+    assert len(tts_client.synthesize_calls) == 3
+
+
+def test_tts_cache_treats_the_default_voice_and_an_explicit_one_as_one_entry(
+    tts_client,
+):
+    """A caller who names the configured default is asking for the audio an
+    omitted voice already produced."""
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    explicit = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "voice": settings.TTS_VOICE}
+    )
+    assert explicit.headers["x-cache"] == "HIT"
+    assert len(tts_client.synthesize_calls) == 1
+
+
+def test_tts_cache_serves_every_format_from_one_synthesis(tts_client):
+    """WAV and PCM are the same audio with and without a 44-byte header, so
+    the second format is a rendering decision, not a second GPU call."""
+    wav = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    pcm = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "response_format": "pcm"}
+    )
+    assert pcm.headers["x-cache"] == "HIT"
+    assert len(tts_client.synthesize_calls) == 1
+    assert pcm.content == wav.content[44:]
+
+
+def test_tts_cache_hit_still_streams_the_same_bytes(tts_client):
+    """A hit must be indistinguishable to a streaming client, or code written
+    against the streaming contract breaks the moment its text repeats.
+
+    Asserts the byte stream rather than the chunk sizes: raw PCM carries no
+    framing, so where the reply is split is the transport's business and no
+    caller can depend on it.
+    """
+    body = {"input": "হ্যালো", "stream": True, "response_format": "pcm"}
+    with tts_client.stream("POST", "/v1/audio/speech", json=body) as live:
+        assert live.headers["x-cache"] == "MISS"
+        fresh = b"".join(live.iter_raw())
+    with tts_client.stream("POST", "/v1/audio/speech", json=body) as replay:
+        assert replay.headers["x-cache"] == "HIT"
+        cached = b"".join(replay.iter_raw())
+
+    assert len(tts_client.synthesize_calls) == 1
+    assert cached == fresh
+    assert len(cached) == FAKE_TTS_CHUNKS * FAKE_TTS_CHUNK_FRAMES * 2
+
+
+def test_tts_streamed_reply_is_cached_for_the_buffered_endpoint(tts_client):
+    """One entry serves both modes: a streamed miss fills the cache that a
+    later stream=false request reads."""
+    with tts_client.stream(
+        "POST",
+        "/v1/audio/speech",
+        json={"input": "হ্যালো", "stream": True, "response_format": "pcm"},
+    ) as live:
+        streamed = b"".join(live.iter_raw())
+
+    buffered = tts_client.post(
+        "/v1/audio/speech", json={"input": "হ্যালো", "response_format": "pcm"}
+    )
+    assert buffered.headers["x-cache"] == "HIT"
+    assert buffered.content == streamed
+    assert len(tts_client.synthesize_calls) == 1
+
+
+def test_tts_cache_can_be_turned_off(tts_client, monkeypatch):
+    monkeypatch.setattr(speech_cache, "enabled", False)
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    again = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    assert again.headers["x-cache"] == "MISS"
+    assert len(tts_client.synthesize_calls) == 2
+
+
+def test_tts_cache_rejected_requests_never_reach_the_cache(tts_client):
+    """Validation runs ahead of the lookup, so a disabled service cannot
+    keep answering from what it cached while it was enabled."""
+    tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    settings.TTS_ENABLED = False
+    try:
+        resp = tts_client.post("/v1/audio/speech", json={"input": "হ্যালো"})
+    finally:
+        settings.TTS_ENABLED = True
+    assert resp.status_code == 503
+
+
+def test_speech_cache_key_ignores_description_whitespace():
+    """The engine strips the description before using it, so " x " and "x"
+    produce one recording and must not occupy two entries."""
+    cache = SpeechCache(max_bytes=1024)
+    assert cache.key("হ্যালো", "Aditi", "  calm  ") == cache.key("হ্যালো", "Aditi", "calm")
+    assert cache.key("হ্যালো", "Aditi", None) == cache.key("হ্যালো", "Aditi", "   ")
+
+
+def test_speech_cache_key_separates_fields_that_could_run_together():
+    """Without the separator, text+voice concatenation collides: ("a", "bc")
+    and ("ab", "c") would hash the same and swap one caller's audio for
+    another's."""
+    cache = SpeechCache(max_bytes=1024)
+    assert cache.key("a", "bc", None) != cache.key("ab", "c", None)
+
+
+def test_speech_cache_evicts_the_coldest_entry_to_stay_under_its_cap():
+    cache = SpeechCache(max_bytes=200)
+    cache.put("a", 44100, [b"\x00" * 100])
+    cache.put("b", 44100, [b"\x00" * 100])
+    cache.get("a")
+    cache.put("c", 44100, [b"\x00" * 100])
+
+    assert cache.get("a") is not None
+    assert cache.get("b") is None
+    assert cache.get("c") is not None
+    assert cache.nbytes <= cache.max_bytes
+
+
+def test_speech_cache_refuses_an_entry_larger_than_the_whole_cap():
+    """Storing it would evict everything else and still not fit, so the one
+    oversized reply would empty the cache on every request."""
+    cache = SpeechCache(max_bytes=100)
+    cache.put("small", 44100, [b"\x00" * 50])
+    cache.put("huge", 44100, [b"\x00" * 500])
+
+    assert cache.get("huge") is None
+    assert cache.get("small") is not None
+
+
+def test_speech_cache_replacing_an_entry_does_not_double_count_its_bytes():
+    cache = SpeechCache(max_bytes=1000)
+    cache.put("a", 44100, [b"\x00" * 100])
+    cache.put("a", 44100, [b"\x00" * 100])
+    assert cache.nbytes == 100
+
+
+def test_speech_cache_disabled_stores_nothing():
+    cache = SpeechCache(max_bytes=1000, enabled=False)
+    cache.put("a", 44100, [b"\x00" * 100])
+    assert cache.get("a") is None
+    assert cache.nbytes == 0
+
+
+def test_speech_cache_counts_evictions_so_the_cap_can_be_sized():
+    """Evictions are the signal that TTS_CACHE_MAX_MB is too small; without
+    the counter, raising it is guesswork."""
+    cache = SpeechCache(max_bytes=200)
+    cache.put("a", 44100, [b"\x00" * 100])
+    cache.put("b", 44100, [b"\x00" * 100])
+    assert cache.evictions == 0
+
+    cache.put("c", 44100, [b"\x00" * 100])
+    assert cache.evictions == 1
+    assert cache.stats()["evictions"] == 1
+
+
+def test_speech_cache_sizing_says_a_bigger_cap_is_pointless_without_evictions():
+    """A cache holding its whole working set cannot be improved with memory,
+    and the verdict has to say so rather than invite a bigger number."""
+    cache = SpeechCache(max_bytes=1000)
+    cache.put("a", 44100, [b"\x00" * 100])
+    cache.get("a")
+    cache.get("missing")
+    assert "buys nothing" in cache.sizing()
+
+    for key in range(20):
+        cache.put(str(key), 44100, [b"\x00" * 100])
+    assert "may help" in cache.sizing()
+
+
+def test_speech_cache_clear_resets_every_counter():
+    cache = SpeechCache(max_bytes=100)
+    cache.put("a", 44100, [b"\x00" * 50])
+    cache.get("a")
+    cache.get("nope")
+    cache.put("huge", 44100, [b"\x00" * 500])
+    cache.clear()
+
+    stats = cache.stats()
+    assert stats["entries"] == 0
+    assert stats["used_mb"] == 0
+    assert (stats["hits"], stats["misses"]) == (0, 0)
+    assert (stats["evictions"], stats["rejections"]) == (0, 0)
+
+
+def test_speech_cache_stats_report_mib_not_bytes():
+    """The counters exist to be read by a human sizing TTS_CACHE_MAX_MB, and
+    268435456 is not a number anyone reads."""
+    cache = SpeechCache(max_bytes=256 * 1024 * 1024)
+    cache.put("a", 44100, [b"\x00" * (3 * 1024 * 1024)])
+    assert cache.stats()["max_mb"] == 256.0
+    assert cache.stats()["used_mb"] == 3.0
+
+
+def test_gateway_health_reports_cache_counters():
+    """Sizing the cap is a production decision, so the numbers have to be
+    reachable from a deployed box rather than only from a test."""
+    body = TestClient(create_gateway_app()).get("/health").json()
+    assert body["tts_cache"]["max_mb"] == settings.TTS_CACHE_MAX_MB
+    assert "evictions" in body["tts_cache"]
+
+
+def test_cache_cap_setting_is_mib_converted_to_bytes_once():
+    """The knob is MiB for whoever sets it; the cache counts bytes. The
+    conversion lives in config so no caller has to remember which unit it
+    is holding."""
+    assert settings.TTS_CACHE_MAX_BYTES == settings.TTS_CACHE_MAX_MB * 1024 * 1024
