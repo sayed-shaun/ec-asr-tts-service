@@ -338,7 +338,7 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 
 - `ZIPFORMER_MODEL_NAME` — the ASR checkpoint. A different repo layout also needs a `ZipformerLayout` (see [`zipformer/layouts.py`](src/litserver/zipformer/layouts.py)).
 - `ZIPFORMER_PROVIDER` — onnxruntime execution provider, `cuda` (default) or `cpu`. Independent of `ACCELERATOR`; needs a matching wheel (see [Current Models](#current-models)).
-- `TTS_ENABLED` — **off by default.** Set `true` to mount the TTS LitAPI alongside ASR in the same LitServe process; it costs a second checkpoint's VRAM per worker. While off, ASR needs no GPU at all and `POST /v1/audio/speech` answers `503`.
+- `TTS_ENABLED` — **on by default.** Mounts the TTS LitAPI alongside ASR in the same LitServe process; it costs a second checkpoint's VRAM per worker (~2.6GB in bf16). Set `false` on a box whose GPU can't hold both: ASR then needs no GPU at all and `POST /v1/audio/speech` answers `503`.
 - `TTS_MODEL_NAME` / `TTS_VOICE` / `TTS_MAX_CHARS` — the TTS checkpoint, the voice used when a request names none, and the clause length text is split at before synthesis.
 - `TTS_ATTN_IMPLEMENTATION` — `auto` (default, per-submodule), `eager`, or `sdpa`. See the TTS notes above before changing it; `sdpa` breaks this checkpoint's text encoder.
 - `TTS_CACHE_ENABLED` / `TTS_CACHE_MAX_MB` — whether the gateway replays already-synthesized speech instead of calling the model, and how much audio it keeps to do so, in MiB (default on, 1024 ≈ 3,000 four-second prompts). It is a ceiling, not an allocation — the gateway grows into it only as distinct text arrives. See the TTS notes above.
