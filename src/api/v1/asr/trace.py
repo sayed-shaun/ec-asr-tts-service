@@ -1,12 +1,20 @@
-"""Save each ASR request's audio and transcript to disk for later debugging.
+"""Save each ASR conversation's audio and transcripts to disk for debugging.
 
 A bad transcript is only debuggable with the audio that produced it, and by
-the time someone reports one the clip is gone. So every request through the
-gateway leaves a folder behind:
+the time someone reports one the clip is gone. So the gateway keeps, per day,
+one JSON per conversation with every turn in it, and the clips beside it:
 
-    TRACE_DIR/2026-10-05/143012-আমার_ফি_কত/
-        audio_0.wav        the clip exactly as the caller sent it
-        transcript.json    route, status, timing, config and LitServe's reply
+    TRACE_DIR/2026-10-05/
+        143012-আমার_ফি_কত.json         the whole conversation, turn by turn
+        143012-আমার_ফি_কত_t1_0.wav     turn 1's clip, exactly as sent
+        143012-আমার_ফি_কত_t2_0.wav     turn 2's clip
+
+The service itself has no notion of a session: every ASR call is independent.
+A conversation is whatever the caller says it is, through an optional
+`X-Conversation-Id` header. Requests sharing an id append turns to one JSON;
+a request without the header is a one-turn conversation of its own. The file
+is named from the first transcribed sentence of the conversation's first turn
+and the name never changes afterwards, so a later turn cannot move the file.
 
 The gateway rather than the model worker, because it is the one process every
 request passes through and it already holds both halves: the bytes the client
@@ -22,13 +30,19 @@ Tracing must never cost a caller their transcript, so a write that fails is
 logged and dropped, and the write runs on a thread so a slow disk cannot
 stall the event loop. Day folders older than TRACE_RETENTION_DAYS are pruned
 when a new day starts, which bounds disk use without a cron job.
+
+A conversation stays in the day folder it started in, even when it runs past
+midnight. Its id -> file mapping is remembered in memory; after a restart it
+is recovered by scanning today's JSONs for the id.
 """
 
 import asyncio
 import json
 import shutil
+import threading
 import unicodedata
 import uuid
+from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -69,7 +83,7 @@ def _name_from(meta: dict[str, Any]) -> str:
 
     Naming the folder after what the caller said lets someone find "the one
     where it misheard the fee" by browsing, rather than opening every
-    transcript.json. Falls back to the status when there is no transcript.
+    the conversation's JSON. Falls back to the status when there is no transcript.
     """
     output = (meta.get("response") or {}).get("output") or []
     text = output[0].get("source", "") if output else ""
@@ -104,47 +118,120 @@ def _prune(root: Path, today: date) -> None:
             shutil.rmtree(day_dir, ignore_errors=True)
 
 
+_MAX_TRACKED = 1000
+_lock = threading.Lock()
+_open: OrderedDict[str, Path] = OrderedDict()
+"""conversation id -> its JSON, for conversations seen by this process.
+
+Bounded because ids come from callers; the coldest is forgotten first and is
+simply re-found by scanning on its next turn. Guarded by _lock together with
+the read-modify-write of the JSON: _write runs on worker threads, and two
+turns of one conversation landing at once would otherwise lose one.
+"""
+
+
+def _find_on_disk(day_dir: Path, conversation_id: str) -> Path | None:
+    for path in sorted(day_dir.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if record.get("conversation_id") == conversation_id:
+            return path
+    return None
+
+
+def _create(day_dir: Path, started: datetime, meta: dict[str, Any]) -> Path:
+    """Claim a fresh JSON with exclusive create so no two conversations share
+    a stem, even in the same second with the same first sentence."""
+    base = f"{started:%H%M%S}-{_name_from(meta)}"
+    stem, suffix = base, 2
+    while True:
+        path = day_dir / f"{stem}.json"
+        try:
+            path.open("x").close()
+            return path
+        except FileExistsError:
+            stem = f"{base}-{suffix}"
+            suffix += 1
+
+
+def _append_turn(
+    json_path: Path,
+    record: dict[str, Any],
+    route: str,
+    clips: list[bytes],
+    meta: dict[str, Any],
+    started: datetime,
+) -> None:
+    """Write this turn's clips, then atomically replace the conversation JSON."""
+    turn = len(record["turns"]) + 1
+    files = []
+    for index, clip in enumerate(clips):
+        name = f"{json_path.stem}_t{turn}_{index}.{_extension(clip)}"
+        (json_path.parent / name).write_bytes(clip)
+        files.append(name)
+
+    record["turns"].append(
+        {
+            "turn": turn,
+            "route": route,
+            "received_at": started.isoformat(timespec="milliseconds"),
+            "audio_files": files,
+            **meta,
+        }
+    )
+    record["updated_at"] = started.isoformat(timespec="milliseconds")
+    tmp = json_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(json_path)
+
+
 def _write(
     route: str,
     clips: list[bytes],
     meta: dict[str, Any],
     started: datetime,
+    conversation_id: str | None = None,
 ) -> Path:
     root = Path(settings.TRACE_DIR)
     root.mkdir(parents=True, exist_ok=True)
     _prune(root, started.date())
-
-    trace_id = uuid.uuid4().hex[:8]
     day_dir = root / started.date().isoformat()
     day_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{started:%H%M%S}-{_name_from(meta)}"
-    trace_dir = day_dir / stem
-    suffix = 2
-    while True:
+
+    with _lock:
+        json_path = _open.get(conversation_id) if conversation_id else None
+        if json_path is None and conversation_id:
+            json_path = _find_on_disk(day_dir, conversation_id)
+        record: dict[str, Any] | None = None
+        if json_path is not None:
+            try:
+                record = json.loads(json_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                record = None
+        created = record is None
+        if created:
+            json_path = _create(day_dir, started, meta)
+            record = {
+                "conversation_id": conversation_id or uuid.uuid4().hex[:8],
+                "started_at": started.isoformat(timespec="milliseconds"),
+                "turns": [],
+            }
         try:
-            trace_dir.mkdir()
-            break
-        except FileExistsError:
-            trace_dir = day_dir / f"{stem}-{suffix}"
-            suffix += 1
-
-    files = []
-    for index, clip in enumerate(clips):
-        name = f"audio_{index}.{_extension(clip)}"
-        (trace_dir / name).write_bytes(clip)
-        files.append(name)
-
-    record = {
-        "trace_id": trace_id,
-        "route": route,
-        "received_at": started.isoformat(timespec="milliseconds"),
-        "audio_files": files,
-        **meta,
-    }
-    (trace_dir / "transcript.json").write_text(
-        json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return trace_dir
+            _append_turn(json_path, record, route, clips, meta, started)
+        except BaseException:
+            # _create left an empty file claiming the name; a later turn
+            # would find it and fail to parse it, so do not leave it behind.
+            if created:
+                json_path.unlink(missing_ok=True)
+            raise
+        if conversation_id:
+            _open[conversation_id] = json_path
+            _open.move_to_end(conversation_id)
+            while len(_open) > _MAX_TRACKED:
+                _open.popitem(last=False)
+    return json_path
 
 
 async def save_trace(
@@ -152,12 +239,15 @@ async def save_trace(
     clips: list[bytes],
     meta: dict[str, Any],
     started: datetime,
+    conversation_id: str | None = None,
 ) -> None:
-    """Write one request's trace folder; log and swallow any failure."""
+    """Append one request to its conversation's JSON; log and swallow failures."""
     if not settings.TRACE_ENABLED:
         return
     try:
-        trace_dir = await asyncio.to_thread(_write, route, clips, meta, started)
-        logger.debug(f"ASR trace saved to {trace_dir}")
+        trace_path = await asyncio.to_thread(
+            _write, route, clips, meta, started, conversation_id
+        )
+        logger.debug(f"ASR trace saved to {trace_path}")
     except Exception as exc:  # noqa: BLE001 -- a trace must never fail a request
         logger.warning(f"Could not save ASR trace: {exc!r}")

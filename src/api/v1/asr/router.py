@@ -3,10 +3,10 @@ import binascii
 import json
 import time
 from datetime import datetime
-from typing import Any, Awaitable
+from typing import Annotated, Any, Awaitable
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 
 from src.api import client as litserve_client
@@ -34,6 +34,7 @@ async def _forward_traced(
     clips: list[bytes],
     config: dict[str, Any],
     call: Awaitable[httpx.Response],
+    conversation_id: str | None = None,
 ) -> JSONResponse:
     """Forward to LitServe and leave a trace of the exchange, success or not."""
     started = datetime.now().astimezone()
@@ -49,10 +50,22 @@ async def _forward_traced(
         raise
     finally:
         meta["elapsed_s"] = round(time.perf_counter() - t0, 3)
-        await save_trace(route, clips, meta, started)
+        await save_trace(route, clips, meta, started, conversation_id)
 
 
-async def transcribe_upload(file: UploadFile) -> JSONResponse:
+ConversationId = Annotated[
+    str | None,
+    Header(
+        max_length=128,
+        description="Optional. Requests sharing an id are traced as turns of "
+        "one conversation; without it each request is its own.",
+    ),
+]
+
+
+async def transcribe_upload(
+    file: UploadFile, conversation_id: str | None = None
+) -> JSONResponse:
     """Send one uploaded clip to LitServe and return its raw response.
 
     Only /v1/audio/transcriptions takes a file; POST /asr speaks the JSON
@@ -72,11 +85,14 @@ async def transcribe_upload(file: UploadFile) -> JSONResponse:
             [audio_bytes],
             {"filename": file.filename, "content_type": file.content_type},
             litserve_client.transcribe(client, audio_content_b64),
+            conversation_id,
         )
 
 
 @router.post("/asr", response_model=AsrResponse)
-async def asr(request: AsrRequest) -> JSONResponse:
+async def asr(
+    request: AsrRequest, x_conversation_id: ConversationId = None
+) -> JSONResponse:
     """The Java service's contract: base64 clips in, transcripts out.
 
     No file upload -- a caller holding a file base64s it into `audio`, and the
@@ -93,11 +109,14 @@ async def asr(request: AsrRequest) -> JSONResponse:
             [_clip_bytes(clip.audioContent) for clip in request.audio],
             payload["config"],
             litserve_client.transcribe_request(client, payload),
+            x_conversation_id,
         )
 
 
 @router.post("/v1/audio/transcriptions")
-async def audio_transcriptions(file: UploadFile = File(...)) -> JSONResponse:
+async def audio_transcriptions(
+    file: UploadFile = File(...), x_conversation_id: ConversationId = None
+) -> JSONResponse:
     """OpenAI-compatible transcription: multipart audio in, {"text": ...} out.
 
     The counterpart to POST /v1/audio/speech, so a client written against that
@@ -105,7 +124,7 @@ async def audio_transcriptions(file: UploadFile = File(...)) -> JSONResponse:
     utterance because a caller feeding a chat turn wants the whole thing, not
     the service's internal split.
     """
-    response = await transcribe_upload(file)
+    response = await transcribe_upload(file, x_conversation_id)
     if response.status_code >= 400:
         return response
     body = json.loads(bytes(response.body))

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import wave
+from collections import OrderedDict
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -77,6 +78,7 @@ def asr_client(monkeypatch, tmp_path):
 
     monkeypatch.setattr("src.api.client.httpx.AsyncClient", fake_async_client)
     monkeypatch.setattr(settings, "TRACE_DIR", str(tmp_path / "traces"))
+    monkeypatch.setattr("src.api.v1.asr.trace._open", OrderedDict())
 
     app = create_gateway_app()
     app.state.captured = captured
@@ -976,7 +978,8 @@ def test_openai_transcriptions_endpoint(asr_client):
 
 
 def _traces(tmp_path) -> list[Path]:
-    return sorted((tmp_path / "traces").glob("*/*"))
+    """One JSON per request, flat inside its day folder."""
+    return sorted((tmp_path / "traces").glob("*/*.json"))
 
 
 def test_asr_route_saves_the_audio_and_transcript_to_the_trace_dir(
@@ -993,12 +996,77 @@ def test_asr_route_saves_the_audio_and_transcript_to_the_trace_dir(
         },
     )
     [trace] = _traces(tmp_path)
-    assert (trace / "audio_0.wav").read_bytes() == base64.b64decode(wav_b64)
-    record = json.loads((trace / "transcript.json").read_text(encoding="utf-8"))
-    assert record["route"] == "/asr"
-    assert record["status_code"] == 200
-    assert record["config"] == {"language": {"sourceLanguage": "bn"}}
-    assert record["response"]["output"][0]["source"] == "হ্যালো"
+    record = json.loads(trace.read_text(encoding="utf-8"))
+    [turn] = record["turns"]
+    assert turn["audio_files"] == [f"{trace.stem}_t1_0.wav"]
+    assert (trace.parent / turn["audio_files"][0]).read_bytes() == base64.b64decode(
+        wav_b64
+    )
+    assert turn["route"] == "/asr"
+    assert turn["status_code"] == 200
+    assert turn["config"] == {"language": {"sourceLanguage": "bn"}}
+    assert turn["response"]["output"][0]["source"] == "হ্যালো"
+
+
+def _turn_body():
+    return {
+        "config": {"language": {"sourceLanguage": "bn"}},
+        "audio": [{"audioContent": make_wav_base64()}],
+    }
+
+
+def test_turns_sharing_a_conversation_id_land_in_one_json(asr_client, tmp_path):
+    """The file is named after the first turn and keeps that name."""
+    headers = {"X-Conversation-Id": "call-42"}
+    for _ in range(3):
+        asr_client.post("/asr", json=_turn_body(), headers=headers)
+    asr_client.post("/asr", json=_turn_body(), headers={"X-Conversation-Id": "other"})
+
+    traces = _traces(tmp_path)
+    assert len(traces) == 2
+    [call] = [
+        r for r in (json.loads(p.read_text(encoding="utf-8")) for p in traces)
+        if r["conversation_id"] == "call-42"
+    ]
+    assert [turn["turn"] for turn in call["turns"]] == [1, 2, 3]
+    assert len({f for turn in call["turns"] for f in turn["audio_files"]}) == 3
+    assert len(list(traces[0].parent.glob("*.wav"))) == 4
+
+
+def test_a_request_without_an_id_is_its_own_conversation(asr_client, tmp_path):
+    asr_client.post("/asr", json=_turn_body())
+    asr_client.post("/asr", json=_turn_body())
+    assert len(_traces(tmp_path)) == 2
+
+
+def test_conversation_survives_a_restart(asr_client, tmp_path, monkeypatch):
+    """The id -> file map is memory only; after a restart the next turn finds
+    its conversation by scanning today's JSONs instead of starting a new one."""
+    headers = {"X-Conversation-Id": "call-7"}
+    asr_client.post("/asr", json=_turn_body(), headers=headers)
+    monkeypatch.setattr("src.api.v1.asr.trace._open", OrderedDict())
+    asr_client.post("/asr", json=_turn_body(), headers=headers)
+
+    [trace] = _traces(tmp_path)
+    assert len(json.loads(trace.read_text(encoding="utf-8"))["turns"]) == 2
+
+
+def test_concurrent_turns_of_one_conversation_are_all_kept(asr_client, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime
+
+    from src.api.v1.asr import trace as asr_trace
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(
+            lambda _: asr_trace._write(
+                "/asr", [b"RIFF"], {"status_code": 200}, datetime.now(), "busy"
+            ),
+            range(20),
+        ))
+    [trace] = _traces(tmp_path)
+    turns = json.loads(trace.read_text(encoding="utf-8"))["turns"]
+    assert sorted(t["turn"] for t in turns) == list(range(1, 21))
 
 
 def test_asr_trace_folder_is_named_after_the_first_transcript(asr_client, tmp_path):
@@ -1011,9 +1079,8 @@ def test_asr_trace_folder_is_named_after_the_first_transcript(asr_client, tmp_pa
     }
     asr_client.post("/asr", json=body)
     asr_client.post("/asr", json=body)
-    names = [trace.name.split("-", 1)[1] for trace in _traces(tmp_path)]
-    assert names[0] == "হ্যালো"
-    assert set(names) <= {"হ্যালো", "হ্যালো-2"}
+    names = [trace.stem.split("-", 1)[1] for trace in _traces(tmp_path)]
+    assert sorted(names) == ["হ্যালো", "হ্যালো-2"]
 
 
 def test_asr_trace_name_falls_back_when_there_is_no_transcript():
@@ -1032,9 +1099,9 @@ def test_openai_transcriptions_saves_a_trace(asr_client, tmp_path):
         "/v1/audio/transcriptions", files={"file": ("a.wav", wav, "audio/wav")}
     )
     [trace] = _traces(tmp_path)
-    assert (trace / "audio_0.wav").read_bytes() == wav
-    record = json.loads((trace / "transcript.json").read_text(encoding="utf-8"))
-    assert record["config"]["filename"] == "a.wav"
+    assert trace.with_name(f"{trace.stem}_t1_0.wav").read_bytes() == wav
+    [turn] = json.loads(trace.read_text(encoding="utf-8"))["turns"]
+    assert turn["config"]["filename"] == "a.wav"
 
 
 def test_asr_trace_records_failures_too(asr_client, tmp_path, monkeypatch):
@@ -1055,9 +1122,26 @@ def test_asr_trace_records_failures_too(asr_client, tmp_path, monkeypatch):
     )
     assert resp.status_code == 502
     [trace] = _traces(tmp_path)
-    record = json.loads((trace / "transcript.json").read_text(encoding="utf-8"))
-    assert record["status_code"] == 502
-    assert record["error"] == "LitServe is unreachable"
+    [turn] = json.loads(trace.read_text(encoding="utf-8"))["turns"]
+    assert turn["status_code"] == 502
+    assert turn["error"] == "LitServe is unreachable"
+
+
+def test_a_failed_first_write_leaves_no_empty_json_behind(
+    asr_client, tmp_path, monkeypatch
+):
+    """The name is claimed before the audio is written; if that write fails,
+    the next turn must not trip over a zero-byte JSON."""
+    real = Path.write_bytes
+    monkeypatch.setattr(
+        Path, "write_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("full"))
+    )
+    asr_client.post("/asr", json=_turn_body(), headers={"X-Conversation-Id": "c"})
+    monkeypatch.setattr(Path, "write_bytes", real)
+    asr_client.post("/asr", json=_turn_body(), headers={"X-Conversation-Id": "c"})
+
+    [trace] = _traces(tmp_path)
+    assert len(json.loads(trace.read_text(encoding="utf-8"))["turns"]) == 1
 
 
 def test_asr_trace_can_be_disabled(asr_client, tmp_path, monkeypatch):
@@ -1103,7 +1187,7 @@ def test_asr_trace_prunes_day_folders_past_retention(tmp_path, monkeypatch):
 
     assert not (root / "2026-01-01").exists()
     assert (root / "not-a-date").exists()
-    assert len(list((root / "2026-01-20").iterdir())) == 1
+    assert len(list((root / "2026-01-20").glob("*.json"))) == 1
 
 
 def test_gateway_health_reports_both_models():

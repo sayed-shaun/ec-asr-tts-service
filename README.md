@@ -364,7 +364,7 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 
 **Tracing**
 
-- `TRACE_ENABLED` / `TRACE_DIR` / `TRACE_RETENTION_DAYS` — on by default. The gateway saves every ASR request (`/asr` and `/v1/audio/transcriptions`, failures included) to `TRACE_DIR/<date>/<HHMMSS>-<first transcribed sentence>/`: each clip exactly as sent (`audio_0.wav`, …) next to a `transcript.json` holding the route, status, timing, config and LitServe's reply. Day folders older than the retention (default 7, `0` keeps everything) are pruned as each new day starts. Compose bind-mounts it to `./.traces` on the host. These are real callers' voices — size the retention to what you're allowed to keep.
+- `TRACE_ENABLED` / `TRACE_DIR` / `TRACE_RETENTION_DAYS` — on by default. The gateway saves every ASR request (`/asr` and `/v1/audio/transcriptions`, failures included) into one folder per day, `TRACE_DIR/<date>/`. Each **conversation** is one JSON, `<HHMMSS>-<first transcribed sentence>.json`, holding every turn (route, status, timing, config, LitServe's reply), with each clip exactly as sent beside it (`<same name>_t<turn>_<clip>.wav`). The service has no sessions of its own, so a caller groups turns by sending an `X-Conversation-Id` header on `/asr` and `/v1/audio/transcriptions`; requests without it are one-turn conversations. A conversation stays in the day folder it started in, and its file name is fixed by its first turn. Day folders older than the retention (default 7, `0` keeps everything) are pruned as each new day starts. Compose bind-mounts it to `./.traces` on the host. These are real callers' voices — size the retention to what you're allowed to keep.
 
 ---
 
