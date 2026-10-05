@@ -35,6 +35,8 @@ services:
       - .env
     networks:
       - speech-net
+    volumes:
+      - ./.traces:/app/.traces
     depends_on:
       litserver:
         condition: service_healthy

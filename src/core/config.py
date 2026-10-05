@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = ".logs"
 
+    TRACE_ENABLED: bool = True
+    TRACE_DIR: str = ".traces"
+    TRACE_RETENTION_DAYS: int = 7
+
     @property
     def TTS_CACHE_MAX_BYTES(self) -> int:
         """The MiB knob in the bytes the cache actually counts."""

@@ -51,7 +51,7 @@ def make_wav_base64(seconds: float = 0.5, sr: int = 16000) -> str:
 
 
 @pytest.fixture
-def asr_client(monkeypatch):
+def asr_client(monkeypatch, tmp_path):
     """A fake /predict on a separate app, reached in-process by monkeypatching
     the client's httpx.AsyncClient so no real socket opens.
     """
@@ -76,6 +76,7 @@ def asr_client(monkeypatch):
         )
 
     monkeypatch.setattr("src.api.client.httpx.AsyncClient", fake_async_client)
+    monkeypatch.setattr(settings, "TRACE_DIR", str(tmp_path / "traces"))
 
     app = create_gateway_app()
     app.state.captured = captured
@@ -972,6 +973,137 @@ def test_openai_transcriptions_endpoint(asr_client):
     )
     assert resp.status_code == 200
     assert resp.json() == {"text": "হ্যালো"}
+
+
+def _traces(tmp_path) -> list[Path]:
+    return sorted((tmp_path / "traces").glob("*/*"))
+
+
+def test_asr_route_saves_the_audio_and_transcript_to_the_trace_dir(
+    asr_client, tmp_path
+):
+    """A bad transcript is only debuggable with the clip that produced it, so
+    each request leaves the audio as sent and the reply side by side."""
+    wav_b64 = make_wav_base64()
+    asr_client.post(
+        "/asr",
+        json={
+            "config": {"language": {"sourceLanguage": "bn"}},
+            "audio": [{"audioContent": wav_b64}],
+        },
+    )
+    [trace] = _traces(tmp_path)
+    assert (trace / "audio_0.wav").read_bytes() == base64.b64decode(wav_b64)
+    record = json.loads((trace / "transcript.json").read_text(encoding="utf-8"))
+    assert record["route"] == "/asr"
+    assert record["status_code"] == 200
+    assert record["config"] == {"language": {"sourceLanguage": "bn"}}
+    assert record["response"]["output"][0]["source"] == "হ্যালো"
+
+
+def test_asr_trace_folder_is_named_after_the_first_transcript(asr_client, tmp_path):
+    """Named by what was said so a misheard request is found by browsing.
+    The fake worker answers "হ্যালো", whose vowel sign and virama must survive
+    the filename cleanup intact."""
+    body = {
+        "config": {"language": {"sourceLanguage": "bn"}},
+        "audio": [{"audioContent": make_wav_base64()}],
+    }
+    asr_client.post("/asr", json=body)
+    asr_client.post("/asr", json=body)
+    names = [trace.name.split("-", 1)[1] for trace in _traces(tmp_path)]
+    assert names[0] == "হ্যালো"
+    assert set(names) <= {"হ্যালো", "হ্যালো-2"}
+
+
+def test_asr_trace_name_falls_back_when_there_is_no_transcript():
+    from src.api.v1.asr.trace import _name_from
+
+    assert _name_from({"status_code": 502, "error": "down"}) == "error"
+    assert _name_from({"status_code": 200, "response": {"output": []}}) == "empty"
+    assert _name_from(
+        {"response": {"output": [{"source": "a/b: c?"}]}}
+    ) == "a_b_c"
+
+
+def test_openai_transcriptions_saves_a_trace(asr_client, tmp_path):
+    wav = base64.b64decode(make_wav_base64())
+    asr_client.post(
+        "/v1/audio/transcriptions", files={"file": ("a.wav", wav, "audio/wav")}
+    )
+    [trace] = _traces(tmp_path)
+    assert (trace / "audio_0.wav").read_bytes() == wav
+    record = json.loads((trace / "transcript.json").read_text(encoding="utf-8"))
+    assert record["config"]["filename"] == "a.wav"
+
+
+def test_asr_trace_records_failures_too(asr_client, tmp_path, monkeypatch):
+    """An unreachable worker is the request someone will most want to replay."""
+
+    async def unreachable(*args, **kwargs):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(
+        "src.api.client.transcribe_request", lambda client, payload: unreachable()
+    )
+    resp = asr_client.post(
+        "/asr",
+        json={
+            "config": {"language": {"sourceLanguage": "bn"}},
+            "audio": [{"audioContent": make_wav_base64()}],
+        },
+    )
+    assert resp.status_code == 502
+    [trace] = _traces(tmp_path)
+    record = json.loads((trace / "transcript.json").read_text(encoding="utf-8"))
+    assert record["status_code"] == 502
+    assert record["error"] == "LitServe is unreachable"
+
+
+def test_asr_trace_can_be_disabled(asr_client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "TRACE_ENABLED", False)
+    asr_client.post(
+        "/asr",
+        json={
+            "config": {"language": {"sourceLanguage": "bn"}},
+            "audio": [{"audioContent": make_wav_base64()}],
+        },
+    )
+    assert _traces(tmp_path) == []
+
+
+def test_asr_trace_failure_never_fails_the_request(asr_client, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("src.api.v1.asr.trace._write", broken)
+    resp = asr_client.post(
+        "/asr",
+        json={
+            "config": {"language": {"sourceLanguage": "bn"}},
+            "audio": [{"audioContent": make_wav_base64()}],
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_asr_trace_prunes_day_folders_past_retention(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from src.api.v1.asr import trace as asr_trace
+
+    root = tmp_path / "traces"
+    (root / "2026-01-01").mkdir(parents=True)
+    (root / "not-a-date").mkdir()
+    monkeypatch.setattr(settings, "TRACE_DIR", str(root))
+    monkeypatch.setattr(settings, "TRACE_RETENTION_DAYS", 7)
+    monkeypatch.setattr(asr_trace, "_pruned_for", None)
+
+    asr_trace._write("/asr", [b"RIFF"], {}, datetime(2026, 1, 20, 12, 0, 0))
+
+    assert not (root / "2026-01-01").exists()
+    assert (root / "not-a-date").exists()
+    assert len(list((root / "2026-01-20").iterdir())) == 1
 
 
 def test_gateway_health_reports_both_models():

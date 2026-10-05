@@ -362,6 +362,10 @@ All settings are plain env vars (no prefix), read from `.env`. See [`.env.exampl
 - `LITSERVE_BASE_URL` — where the gateway reaches the model server. Defaults to the compose service name (`http://litserver:8000`), which resolves only inside that network; set it explicitly when the two run apart, and keep it in step with `LITSERVE_PORT`.
 - `CORS_ALLOW_ORIGINS` — comma-separated origins allowed to call the gateway cross-origin, so a browser UI can hit `/asr` and `/v1/audio/speech` directly instead of proxying.
 
+**Tracing**
+
+- `TRACE_ENABLED` / `TRACE_DIR` / `TRACE_RETENTION_DAYS` — on by default. The gateway saves every ASR request (`/asr` and `/v1/audio/transcriptions`, failures included) to `TRACE_DIR/<date>/<HHMMSS>-<first transcribed sentence>/`: each clip exactly as sent (`audio_0.wav`, …) next to a `transcript.json` holding the route, status, timing, config and LitServe's reply. Day folders older than the retention (default 7, `0` keeps everything) are pruned as each new day starts. Compose bind-mounts it to `./.traces` on the host. These are real callers' voices — size the retention to what you're allowed to keep.
+
 ---
 
 ## Client examples
