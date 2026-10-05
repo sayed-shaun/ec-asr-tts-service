@@ -8,7 +8,7 @@ services:
     environment:
       - PYTORCH_ALLOC_CONF=expandable_segments:True
     networks:
-      - asr-net
+      - speech-net
     volumes:
       - hf-cache:/opt/cache/huggingface
     healthcheck:
@@ -34,13 +34,13 @@ services:
     env_file:
       - .env
     networks:
-      - asr-net
+      - speech-net
     depends_on:
       litserver:
         condition: service_healthy
 
 networks:
-  asr-net:
+  speech-net:
 
 volumes:
   hf-cache:

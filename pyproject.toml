@@ -1,5 +1,5 @@
 [project]
-name = "ec-asr-tts-service"
+name = "ec-speech-service"
 version = "0.1.0"
 description = "Bengali speech-to-text service"
 requires-python = "==3.12.*"
